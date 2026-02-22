@@ -37,5 +37,13 @@ node_modules/
 *.key
 credentials.json
 
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Docker
+postgres_data/
+
 # Claude Code
 .claude/
