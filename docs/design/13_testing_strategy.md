@@ -1,0 +1,395 @@
+# 13. テスト戦略設計書
+
+## 1. 概要
+
+ルール主導アーキテクチャにより、決定論的処理のテストカバレッジを最大化できる。
+AIの非決定性はaiAssist/aiFullモードに限定されるため、
+ruleモードのパイプライン全体を厳密にテストする。
+
+**テスト基盤:**
+- フレームワーク: `pytest` + `pytest-asyncio`
+- モック: `unittest.mock` + MockExchange + MockAIProvider + MockDataProvider
+- DB: SQLite in-memory（テスト専用）
+- カバレッジ目標: guard_engine, position_sizer, price_normalizer, indicator_engine は100%必須
+
+---
+
+## 2. モジュール別テスト方針
+
+### 最高優先度
+
+**guard_engine（セーフガードエンジン）**
+```
+理由: バグ = 実損害（資金保護の最終防衛線）
+カバレッジ: 100%
+
+テストケース:
+  - SG-001〜SG-040 全ルールの正常動作
+  - 各ガードの境界値テスト
+    例: SG-001 maxDailyLossPct=10 で損失率が9.99%→PASS, 10.0%→HALT, 10.01%→HALT
+  - 依存関係テスト
+    例: SG-007 は sg.consecutiveLoss.enabled=true の時のみ評価
+  - 複数ガード同時発火
+    例: SG-001(HALT) + SG-012(BLOCK) → trader_halted=true
+  - 全ガード評価（早期終了なし）の検証
+  - GuardState集約ロジック
+  - 価格サニティチェック（監査4）
+  - RRサニティチェック（生存性）
+  - ポジションサイズ上限チェック（生存性）
+```
+
+**position_sizer（ポジションサイズ算出）**
+```
+理由: バグ = 過大リスク
+カバレッジ: 100%
+
+テストケース:
+  - 基本算出: capital=1,000,000, risk=2%, sl=20pips → 期待ロット
+  - JPYペアとUSDペアのpip_value差異
+  - 最小ロットクリップ: 算出値 < min_lot → min_lotに切り上げ
+  - 最大ロットクリップ: 算出値 > max_lot → max_lotに切り下げ
+  - sl_pips=0 の異常入力 → 安全側（min_lot）
+  - capital=0 の異常入力 → lot_size=min_lot
+  - _debug出力の検証（透明性）
+  - 固定ロットとリスク%の排他制御
+```
+
+**price_normalizer（価格正規化）**
+```
+理由: バグ = 損益計算の誤り
+カバレッジ: 100%
+
+テストケース:
+  - JPYペア: 149.50→149.60 = 10 pips
+  - USDペア: 1.0850→1.0860 = 10 pips
+  - pips→価格変換の逆変換一致
+  - pip_value算出（各ペア）
+  - 損益計算: BUY + 10pips profit → 正の金額
+  - 損益計算: SELL + 10pips loss → 負の金額
+  - round_price: 取引所の最小単位への丸め
+  - Cryptoペアのpip定義
+```
+
+**indicator_engine（テクニカル指標計算）**
+```
+理由: バグ = 誤判断（全パイプラインに波及）
+カバレッジ: 100%
+
+テストケース:
+  - EMA(20): 既知データセットで計算精度を検証
+  - EMA(50), EMA(200): 同上
+  - ADX(14): TradingView等の既知出力と比較
+  - ATR(14): 同上
+  - Donchian(20): 20本のhigh/lowから上限下限を検証
+  - RSI(14): 既知データセットで検証
+  - Bollinger(20,2): 中央線、上下バンドの算出精度
+  - Swing High/Low: パターン検出の正確性
+  - ウォームアップ期間: 足数不足時にNoneを返す
+  - インクリメンタル更新: 全履歴再計算と差分更新が同一結果
+```
+
+### 高優先度
+
+**state_builder（状態変換）**
+```
+テストケース:
+  - trend判定の境界値: ADX=24.9→NEUTRAL, ADX=25.0→条件次第
+  - regime判定: ADX基準の切替
+  - volatility判定: ATR比率の各閾値境界
+  - ema_alignment: 3パターン（bullish/bearish/mixed）
+  - rsi_zone: 29→oversold, 30→neutral, 70→neutral, 71→overbought
+  - trade_allowed: ウォームアップ不足、データ品質異常
+  - タイムトラベル防止検証【監査2】
+```
+
+**decision_orchestrator（パイプラインオーケストレーター）**
+```
+テストケース:
+  - 正常フロー: M1→M2→MX→M3→Guard→Entry
+  - 早期終了: M1不許可→M2〜スキップ
+  - 早期終了: M2不成立→M3スキップ（dir+setupモード）
+  - MX統合: all/dir+setup/scoreの各方式
+  - score方式: 重み付き計算の正確性
+  - 自動ログ記録: pipeline_logsに全段階が記録される
+  - elapsed_msの記録
+  - execution_idの一意性
+```
+
+**m1〜m4 judges（各段階判定）**
+```
+テストケース:
+  - BaseJudgeインターフェース準拠
+  - ruleモード: 各戦略プリセットの判定ロジック
+  - _debug出力: 中間計算値、判定経路が含まれる
+  - aiAssistモード: ruleフォールバックの動作
+  - M3: PositionSizer呼出しの確認
+  - M4: ブレイクイーブン/トレーリング/部分利確/最大保有時間
+```
+
+**prompt_assembler（プロンプト組立）**
+```
+テストケース:
+  - 4層プロンプトの組立
+  - Layer2サニタイズ: インジェクションパターン検出
+  - 文字数制限（2000文字）
+  - 制御文字除去
+  - aiAssist時のLayer4追加
+  - JSONスキーマバリデーション（出力側）
+```
+
+**order_executor（注文実行）**
+```
+テストケース:
+  - MockExchange経由の発注
+  - 二重発注防止（clientOrderId）
+  - SL/TP注文の発行
+  - 部分決済
+  - limit未約定キャンセル
+  - レートリミッター動作
+```
+
+**gmo_fx_exchange（GMOコイン固有）**
+```
+テストケース:
+  - HMAC署名生成
+  - 各注文種別（MARKET/LIMIT/STOP）
+  - レートリミット遵守
+  - エラーハンドリング（429, 500等）
+  - トレーリングストップ（STOP注文の変更で実現）
+```
+
+### 中優先度
+
+**bar_builder（足生成）**
+```
+テストケース:
+  - ティック→足変換の正確性
+  - 足確定タイミング（各時間足）
+  - 不完全足の扱い
+  - Mid価格算出（Bid/Askから）
+```
+
+**backtest_engine（バックテストエンジン）**
+```
+テストケース:
+  - 基本実行フロー
+  - Look-ahead Bias排除【監査2】
+  - スリッページモデリング
+  - 評価指標の算出精度
+  - ruleモードの完全再現性
+```
+
+**API routes（APIエンドポイント）**
+```
+テストケース:
+  - FastAPI TestClient でリクエスト/レスポンス検証
+  - バリデーションエラー（不正入力）
+  - @verify_ownership の403レスポンス
+  - ページネーション
+```
+
+---
+
+## 3. 【監査2】Look-ahead Bias排除テスト
+
+```python
+class TestLookAheadBias:
+    """Look-ahead Bias排除テスト"""
+
+    def test_state_builder_no_future_data(self):
+        """時刻T=12:00のState Builder実行時、12:00:01以降のOHLCVが含まれない"""
+        clock = SimulationClock(start=datetime(2025, 1, 1), end=datetime(2025, 12, 31))
+        clock.advance_to(datetime(2025, 6, 15, 12, 0, 0))
+
+        provider = HistoricalDataProvider(db, clock)
+        bars = await provider.get_ohlcv("USD_JPY", "M5", limit=100)
+
+        for bar in bars:
+            assert bar.timestamp <= clock.now()
+
+    def test_backtest_step_data_isolation(self):
+        """バックテスト中、各ステップで利用可能データのみが渡される"""
+        # ステップ1: T=10:00 → 10:00以前のデータのみ
+        # ステップ2: T=10:05 → 10:05以前のデータのみ
+        ...
+
+    def test_backtest_db_isolation(self):
+        """backtest/simulationモード時のDB書込先が本番テーブルでない"""
+        # backtest_tradesテーブルに書込み
+        # trade_historyテーブルにレコードがないことを確認
+        ...
+
+    def test_indicator_no_future_bars(self):
+        """指標計算に未来の足が含まれない"""
+        # IndicatorEngineに確定足のみを渡す
+        # ウォームアップ期間中はNoneを返す
+        ...
+```
+
+---
+
+## 4. 【監査1】テナント隔離テスト
+
+```python
+class TestTenantIsolation:
+    """テナント隔離テスト"""
+
+    def test_user_cannot_access_other_traders(self):
+        """ユーザーAのセッションでユーザーBのトレーダーが取得できない"""
+        session_a = TenantAwareSession(db_session, user_id=1)
+        session_b = TenantAwareSession(db_session, user_id=2)
+
+        # ユーザーBのトレーダーを作成
+        trader_b = Trader(user_id=2, trader_name="B's trader")
+        db_session.add(trader_b)
+        db_session.commit()
+
+        # ユーザーAのセッションでは取得できない
+        result = session_a.query(Trader).all()
+        assert all(t.user_id == 1 for t in result)
+
+    def test_api_ownership_verification(self):
+        """ユーザーAがユーザーBのtrader_idを指定 → 403"""
+        response = client.get(
+            f"/api/v1/traders/{trader_b_id}",
+            headers={"Authorization": f"Bearer {user_a_token}"},
+        )
+        assert response.status_code == 403
+
+    def test_tenant_aware_session_auto_filter(self):
+        """TenantAwareSessionが全クエリにuser_idフィルタを自動付与"""
+        # 直接SQLのテスト含む
+        ...
+```
+
+---
+
+## 5. 設計思想の検証テスト
+
+```python
+class TestDesignPrinciples:
+    """設計思想の検証"""
+
+    def test_orchestrator_logs_all_stages(self):
+        """オーケストレーターが各段階でpipeline_logsに記録する"""
+        result = await orchestrator.execute_pipeline(...)
+        logs = db.query(PipelineLog).filter_by(execution_id=result.execution_id).all()
+        stages = {log.stage for log in logs}
+        assert "m1" in stages
+        # M1がtradeAllowed=trueの場合、m2も含む
+        ...
+
+    def test_all_judges_implement_base_interface(self):
+        """全JudgeモジュールがBaseJudgeインターフェースに準拠"""
+        for judge_class in [M1DirectionJudge, M2SetupJudge, M3EntryJudge, M4ExitManager]:
+            assert issubclass(judge_class, BaseJudge)
+            assert hasattr(judge_class, 'judge')
+            assert hasattr(judge_class, 'describe_config')
+
+    def test_debug_field_in_output(self):
+        """_debugフィールドが出力に含まれる"""
+        output = m1_judge.judge(input, config)
+        assert "_debug" in asdict(output) or hasattr(output, '_debug')
+        assert isinstance(output._debug, dict)
+        assert len(output._debug) > 0  # 空でない
+
+    def test_config_changes_recorded(self):
+        """config_changesにパラメータ変更が記録される"""
+        # 変更前
+        before = await get_config(trader_id, "m1")
+        # 変更
+        await update_config(trader_id, "m1", new_config, user_id=1)
+        # 変更履歴確認
+        change = db.query(ConfigChange).order_by(ConfigChange.id.desc()).first()
+        assert change.trader_id == trader_id
+        assert change.stage == "m1"
+        assert change.config_before is not None
+        assert change.config_after is not None
+```
+
+---
+
+## 6. Excelテストチェックリスト対応
+
+Excel仕様「テスト_チェックリスト」シートの項目との対応:
+
+```
+カテゴリ      テスト項目              対応テストクラス/メソッド
+-------------------------------------------------------------------
+データ        足生成のTZ              test_bar_builder::test_timezone_utc
+指標          指標不足                test_indicator_engine::test_warmup_none
+SafeGuard     スプレッド停止          test_guard_engine::test_sg012_spread
+SafeGuard     連敗停止                test_guard_engine::test_sg007_consecutive
+統合          dir+setup               test_orchestrator::test_dir_setup_mode
+AI            AIタイムアウト          test_ai_failsafe::test_timeout_fallback
+発注          limit未約定             test_executor::test_limit_cancel
+退出          最大保有時間            test_m4::test_max_hold_force_close
+```
+
+---
+
+## 7. テスト実行環境
+
+### 7-1. conftest.py（共通fixture）
+
+```python
+@pytest.fixture
+def db_session():
+    """SQLite in-memoryセッション"""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    yield session
+    session.close()
+
+@pytest.fixture
+def mock_exchange():
+    """MockExchange（初期残高100万円）"""
+    return MockExchange(initial_balance=1_000_000)
+
+@pytest.fixture
+def mock_ai_provider():
+    """MockAIProvider（固定レスポンス）"""
+    return MockAIProvider(default_response={
+        "trend": "UP", "regime": "trend",
+        "volatility": "normal", "tradeAllowed": True,
+        "confidence": 0.85, "reason_codes": ["TEST"]
+    })
+
+@pytest.fixture
+def price_normalizer():
+    return PriceNormalizer()
+
+@pytest.fixture
+def position_sizer(price_normalizer):
+    return PositionSizer(price_normalizer)
+```
+
+### 7-2. テスト実行コマンド
+
+```bash
+# 全テスト
+pytest backend/tests/ -v
+
+# カバレッジ付き
+pytest backend/tests/ --cov=backend/app --cov-report=html
+
+# 最高優先度モジュールのみ
+pytest backend/tests/unit/test_guard_engine.py \
+       backend/tests/unit/test_position_sizer.py \
+       backend/tests/unit/test_price_normalizer.py \
+       backend/tests/unit/test_indicator_engine.py -v
+
+# バックテストテスト
+pytest backend/tests/backtest/ -v
+```
+
+---
+
+## 8. 関連設計書
+
+- `03_safeguard_engine.md` - guard_engine テスト対象
+- `04_decision_pipeline.md` - orchestrator テスト対象
+- `06_exchange_abstraction.md` - MockExchange, PositionSizer テスト対象
+- `09_backtest_simulation.md` - バックテストエンジン テスト対象
+- `12_directory_structure.md` - テストファイルの配置

@@ -1,0 +1,145 @@
+# 00. エグゼクティブサマリー
+
+## 1. プロジェクト概要
+
+FX（GMOコイン）+ 暗号通貨（bitbank）の自動取引システム。
+オーナーと開発者は別であり、私的利用が前提。
+
+**システムの核心:**
+指標計算・セーフガード判定はPythonで決定論的に行う。
+LLMは「最終判断」「曖昧さの解釈」に限定。
+4段階パイプライン（方向判定→セットアップ→エントリー→退出管理）の
+各段階にrule/aiAssist/aiFullの3モードを設け、
+ruleモードでは完全にPython決定論的処理のみで動作する。
+
+**設計思想:**
+```
+0. 生存性: 利益最大化ではなく破綻回避を最上位目的とする
+1. 透明性: オーナーが「なぜこの判断になったか」を追跡できる
+2. デバッグ容易性: 問題発生時に原因箇所を素早く特定できる
+3. チューニング支援: パラメータ調整の効果を比較検証できる
+```
+
+---
+
+## 2. アーキテクチャ全体像
+
+```
+Market Data Ingest（価格データ受信: GMOコイン / bitbank）
+  → Bar Builder（ティック → OHLC足: M1/M5/M15/M30/H1/H4/D1）
+  → Indicator Engine（インクリメンタル更新: EMA/ADX/ATR/RSI/BB/Donchian/Swing）
+  → State Builder（数値 → 状態ラベル変換: trend/regime/volatility）
+  → Guard Engine（40項目セーフガード評価: 6カテゴリ）
+  → Decision Orchestrator（4段階パイプライン + 自動ログ記録）
+      M1: 方向・レジーム判定（D1/H4/H1）
+      M2: セットアップ判定（H1/M30/M15）
+      M3: 実行・エントリー（M5/M1）+ PositionSizer
+      M4: 退出管理（M5/M1）
+      MX: 統合判定（all/dir+setup/score）
+  → Execution Engine（注文発行・約定確認）
+  → Audit/Logging（全判断の証跡保管: pipeline_logs + config_changes）
+```
+
+**優先順位:**
+```
+強制停止(SafeGuard) > 強制決済(SL/TP/最大保有) > 退出管理 > エントリー判定 > セットアップ > 方向
+```
+
+---
+
+## 3. 技術スタック
+
+```
+バックエンド:
+  - Python 3.11+
+  - FastAPI（REST API + WebSocket）
+  - SQLAlchemy 2.0 + Alembic（PostgreSQL）
+  - pytest + pytest-asyncio
+
+フロントエンド:
+  - Next.js（React + TypeScript）
+  - Zustand（状態管理）
+  - Lightweight Charts（チャート）
+  - Tailwind CSS + shadcn/ui
+
+外部サービス:
+  - GMOコイン API（FX取引）
+  - bitbank API（暗号通貨取引）
+  - OpenAI / Gemini / Claude API（AI判断補助）
+```
+
+---
+
+## 4. 設計書一覧
+
+```
+00_executive_summary.md          ... 本ドキュメント
+01_screen_specification.md       ... 全画面仕様（Figma + Excel統合）
+02_data_pipeline.md              ... データソース・Bar Builder・指標計算・状態変換
+03_safeguard_engine.md           ... 40項目6カテゴリのセーフガード設計
+04_decision_pipeline.md          ... 4段階パイプライン + BaseJudge + 自動ログ
+05_ai_integration.md             ... AI呼出条件・プロンプト・パース・フェイルセーフ
+06_exchange_abstraction.md       ... BaseExchange + PriceNormalizer + PositionSizer
+07_database_schema.md            ... 全テーブル定義（20テーブル超）
+08_api_specification.md          ... REST API + WebSocket 全エンドポイント
+09_backtest_simulation.md        ... バックテスト・シミュレーション
+10_frontend_architecture.md      ... コンポーネント・状態管理
+11_security.md                   ... 認証・暗号化・鍵管理
+12_directory_structure.md        ... ディレクトリ構成
+13_testing_strategy.md           ... テスト方針・テスト設計
+14_cost_management.md            ... LLM APIコスト管理
+15_implementation_phases.md      ... 実装フェーズ計画
+```
+
+---
+
+## 5. 監査指摘対応マトリクス
+
+```
+監査項目                          対策                             設計書
+---------------------------------------------------------------------
+監査1: テナント隔離               TenantAwareSession               07, 08, 13
+                                  @verify_ownership
+監査2: Look-ahead Bias防止        タイムトラベル防止               02, 09, 13
+                                  DB隔離(live/sim/backtest)
+監査3: 鍵管理                     マスターキー外部管理             11
+        プロンプトインジェクション  PromptValidator + ResponseParser 05, 11
+監査4: AI暴走防止                 レートリミット + 予算管理         14
+        価格サニティチェック       GuardEngine内部ルール            03
+        フェイルセーフ             HOLD（判断不能時は何もしない）    05
+```
+
+---
+
+## 6. 生存性設計要素
+
+```
+要素                        実装箇所                   検証箇所
+---------------------------------------------------------------------
+PositionSizer               06 + 04(M3)                13(unit)
+  全注文パスでバイパス不可
+RR比下限チェック            03(GuardEngine)             13(unit)
+  RR < 0.8 → BLOCK
+DD制御                      03(SG-003)                  13(unit)
+  最大ドローダウンで停止
+連敗停止 + ロット半減       03(SG-006〜009)             13(unit)
+日次/月次損失停止           03(SG-001〜002)             13(unit)
+セーフガード最優先          04(Orchestrator)             13(integration)
+破綻確率推定                09(BacktestMetrics)          -
+```
+
+---
+
+## 7. 確定済み方針
+
+- 認証: DB構造はマルチユーザー対応。初回は簡易認証
+- FX取引所: GMOコイン（REST API + WebSocket）
+- 暗号通貨取引所: bitbank
+- 命名規則: API/JSON は lowerCamelCase
+- 時刻管理: 内部UTC統一、UI表示のみJST
+- AI判断ログ: バックエンドのみ（DB記録）。閲覧UIは作らない
+- UI方針: Figma再現 + 仕様不整合は開発側で調整
+
+## 8. 未確定事項
+
+- セーフガード40項目のUI配置（オーナー回答待ち）

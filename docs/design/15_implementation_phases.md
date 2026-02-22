@@ -1,0 +1,146 @@
+# 15. 実装フェーズ計画
+
+## 1. 概要
+
+設計書完成後の実装を4フェーズに分割する。
+各フェーズは独立してデプロイ可能な単位とする。
+
+---
+
+## 2. フェーズ構成
+
+### Phase 1: コアエンジン（ruleモード完動）
+
+```
+目標: ruleモードでの自動取引が動作する最小構成
+期間目安: 最優先
+
+実装対象:
+  バックエンド:
+    - DB（PostgreSQL + Alembic）: 基本テーブル群
+    - データパイプライン: GmoFxDataProvider → BarBuilder → IndicatorEngine → StateBuilder
+    - セーフガード: GuardEngine（40ルール）
+    - 判定パイプライン: M1〜M4 ruleモード + MX + Orchestrator
+    - 取引所: GmoFxExchange + PriceNormalizer + PositionSizer + ExecutionEngine
+    - pipeline_logs + config_changes（設計思想: 透明性）
+    - 認証: JWT簡易認証
+
+  テスト:
+    - guard_engine 100%
+    - position_sizer 100%
+    - price_normalizer 100%
+    - indicator_engine 100%
+    - パイプライン統合テスト
+    - テナント隔離テスト【監査1】
+
+検証基準:
+  - ruleモードで USD_JPY の自動取引が動作する
+  - セーフガードが正しくBLOCK/HALTする
+  - pipeline_logsに全段階の実行ログが記録される
+  - PositionSizerがバイパス不可である
+```
+
+### Phase 2: バックテスト + ペーパートレード
+
+```
+目標: 戦略を過去データで検証し、ペーパートレードで本番前確認可能にする
+
+実装対象:
+  バックエンド:
+    - HistoricalDataProvider + データ蓄積バッチ
+    - BacktestEngine + SimulationClock
+    - MockExchange（スリッページモデリング含む）
+    - 評価指標算出（BacktestMetrics）
+    - ペーパートレードモード（TRADING_MODE=simulation）
+    - backtest_runs/backtest_trades/simulation_historyテーブル
+    - Look-ahead Bias防止テスト【監査2】
+
+  API:
+    - バックテスト実行・結果取得エンドポイント
+
+検証基準:
+  - ruleモードバックテストが再現可能（同一入力→同一結果）
+  - Look-ahead Biasが物理的に排除されている
+  - ペーパートレードがlive/backtestと完全に隔離されている
+```
+
+### Phase 3: AI統合 + フロントエンド
+
+```
+目標: aiAssistモードの動作とUI画面の実装
+
+実装対象:
+  バックエンド:
+    - AIプロバイダ（OpenAI/Gemini/Claude）
+    - PromptAssembler + PromptValidator【監査3】
+    - ResponseParser
+    - フェイルセーフ（AI異常時のHOLD）【監査4】
+    - AIレートリミッター + BudgetTracker【監査4】
+    - ai_decision_logsテーブル
+
+  フロントエンド:
+    - ダッシュボード（Figma再現 + パイプライン状態追加）
+    - トレーダー設定（タブ構造再設計）
+    - 取引履歴（4段階判定展開）
+    - 通知設定
+    - システム設定（セーフガード/コスト管理追加）
+    - WebSocket統合
+
+検証基準:
+  - aiAssistモードが正しくフォールバックする
+  - プロンプトインジェクションが検出・ブロックされる
+  - AIコストが日次/月次予算内に収まる
+  - 全画面が動作する
+```
+
+### Phase 4: 暗号通貨対応 + 追加機能
+
+```
+目標: bitbank対応、バックテストUI、その他
+
+実装対象:
+  - BitbankExchange + BitbankDataProvider
+  - バックテスト画面（UI）
+  - パイプラインログ画面（UI）
+  - 設定変更履歴画面（UI）
+  - デイリーレポートメール
+  - 経済指標カレンダー統合
+  - CSVエクスポート
+
+検証基準:
+  - FX/Cryptoの両方で自動取引が動作する
+  - 全画面が実装済み
+  - 全監査指摘対応が完了
+```
+
+---
+
+## 3. 実装順序の根拠
+
+```
+Phase 1（コアエンジン）が最優先の理由:
+  - ruleモードは完全決定論的でテスト容易
+  - AIなしで動作するため、外部依存を最小化
+  - セーフガードとPositionSizerの正確性が生存性の基盤
+  - pipeline_logsの早期実装でデバッグ基盤を確立
+
+Phase 2（バックテスト）が次の理由:
+  - ruleモードの検証にバックテストが不可欠
+  - パラメータチューニングの基盤
+  - ペーパートレードで本番投入前の安全確認
+
+Phase 3（AI + UI）が後の理由:
+  - AIなしでもruleモードで完全動作する
+  - AIは補助的役割のため、後回しでも機能する
+  - UIは最低限の設定はDB直接 or APIで対応可能
+
+Phase 4（Crypto + 追加）が最後の理由:
+  - FXのみで先行リリース可能
+  - 追加画面はコア機能ではない
+```
+
+---
+
+## 4. 関連設計書
+
+- 全設計書が実装フェーズの参照元となる

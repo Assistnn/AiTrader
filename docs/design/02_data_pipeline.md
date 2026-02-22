@@ -1,0 +1,938 @@
+# 02. データパイプライン設計書
+
+## 1. 概要
+
+本設計書は、外部データソースからの価格データ取得から、判定パイプライン（04_decision_pipeline.md）に
+渡す状態ラベル（StateSnapshot）の生成までの全処理を定義する。
+
+本パイプラインは後続の全設計書の入力データを規定する最重要コンポーネントである。
+
+**処理フロー:**
+
+```
+Market Data Ingest（価格データ受信）
+  → Bar Builder（ティック → OHLC足生成）
+  → Indicator Engine（テクニカル指標のインクリメンタル計算）
+  → State Builder（数値 → 状態ラベル変換）
+  → StateSnapshot（後続パイプラインへの入力）
+```
+
+**設計原則:**
+- 内部時刻は全てUTC統一（UI表示のみJST変換）
+- 全処理はPython決定論的処理（AIは関与しない）
+- インクリメンタル更新（足確定ごとに差分計算、全履歴の再計算は不要）
+- データ品質異常時は安全側に倒す（tradeAllowed=false）
+
+---
+
+## 2. データソース
+
+### 2-1. FX（GMOコイン API）
+
+```
+接続方式:
+  - REST API（Public + Private）
+  - WebSocket（リアルタイムストリーミング）
+
+認証:
+  - APIキー + シークレットキー
+  - HMAC-SHA256署名（タイムスタンプベース）
+  - ヘッダ: API-KEY, API-TIMESTAMP, API-SIGN
+
+Public API（認証不要）:
+  - GET /public/v1/status        ... 取引所ステータス
+  - GET /public/v1/ticker        ... ティッカー（Bid/Ask/Last等）
+  - GET /public/v1/orderbooks    ... 板情報
+  - GET /public/v1/trades        ... 最新約定履歴
+  - GET /public/v1/klines        ... KLine（OHLCV）
+
+Private API（認証必要）:
+  - GET /private/v1/account/margin        ... 証拠金情報
+  - GET /private/v1/account/assets        ... 資産情報
+  - POST /private/v1/order                ... 注文
+  - POST /private/v1/cancelOrder          ... 注文キャンセル
+  - GET /private/v1/openPositions         ... 建玉一覧
+  - POST /private/v1/closeOrder           ... 決済注文
+
+WebSocket:
+  - wss://api.coin.z.com/ws/public/v1     ... Public
+  - wss://api.coin.z.com/ws/private/v1    ... Private
+  - チャンネル: ticker, orderbooks, trades
+
+KLine API仕様:
+  - エンドポイント: GET /public/v1/klines
+  - パラメータ: symbol, interval, date
+  - 対応interval: 1min, 5min, 10min, 15min, 30min, 1hour, 4hour, 8hour, 12hour, 1day, 1week, 1month
+  - レスポンス: openTime, open, high, low, close, volume
+  - 日付指定: YYYYMMDD形式（1日分ずつ取得）
+  - ヒストリカルデータ: 2023/10以降
+
+対応通貨ペア（FX）:
+  USD_JPY, EUR_JPY, GBP_JPY, AUD_JPY, NZD_JPY,
+  CAD_JPY, CHF_JPY, EUR_USD, GBP_USD, AUD_USD,
+  NZD_USD, EUR_GBP, EUR_AUD, GBP_AUD
+
+レートリミット:
+  - 公式には非公開（比較的緩い）
+  - 設計上の安全策: REST APIは1秒1回以下を目安
+  - WebSocket: 購読チャンネル数上限に注意
+
+注意事項:
+  - トレーリングストップはAPI非提供（システム側でSTOP注文変更で実現）
+  - 高頻度取引でのアカウント凍結リスクあり（注文間隔に余裕を持たせる）
+  - Bid/Ask両方取得可能（Mid価格はシステム側で算出）
+```
+
+### 2-2. 暗号通貨（bitbank）
+
+```
+接続方式:
+  - REST API（Public + Private）
+  - WebSocket（リアルタイムストリーミング）
+
+認証:
+  - APIキー + シークレットキー
+  - HMAC-SHA256署名
+
+Public API（認証不要）:
+  - GET /{pair}/ticker           ... ティッカー
+  - GET /{pair}/depth            ... 板情報
+  - GET /{pair}/transactions     ... 約定履歴
+  - GET /{pair}/candlestick      ... ローソク足（OHLCV）
+
+Private API（認証必要）:
+  - GET /user/assets             ... 資産情報
+  - POST /user/spot/order        ... 注文
+  - POST /user/spot/cancel_order ... キャンセル
+
+WebSocket:
+  - wss://stream.bitbank.cc/socket.io/
+  - チャンネル: ticker, depth, transactions
+
+Candlestick API仕様:
+  - エンドポイント: GET /{pair}/candlestick/{candle_type}/{YYYYMMDD}
+  - 対応candle_type: 1min, 5min, 15min, 30min, 1hour, 4hour, 8hour, 12hour, 1day, 1week, 1month
+  - レスポンス: [open, high, low, close, volume, timestamp]
+
+対応通貨ペア（主要）:
+  btc_jpy, eth_jpy, xrp_jpy, ltc_jpy,
+  bcc_jpy, mona_jpy, xlm_jpy, bat_jpy 等
+
+レートリミット:
+  - Public API: 10回/秒
+  - Private API: 6回/秒（注文系は更に制限あり）
+```
+
+### 2-3. データソース抽象化（BaseDataProvider）
+
+GMOコインとbitbankの差異を吸収する共通インターフェース。
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Callable, Awaitable
+
+@dataclass
+class OHLCV:
+    """OHLCV足データ"""
+    timestamp: datetime      # UTC
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+@dataclass
+class Ticker:
+    """ティッカー情報"""
+    timestamp: datetime      # UTC
+    bid: float               # 最良買気配
+    ask: float               # 最良売気配
+    last: float              # 最終約定価格
+    volume: float            # 24h出来高
+
+@dataclass
+class Spread:
+    """スプレッド情報"""
+    timestamp: datetime      # UTC
+    bid: float
+    ask: float
+    spread_raw: float        # ask - bid
+    spread_pips: float       # PriceNormalizerで変換後
+
+class BaseDataProvider(ABC):
+    """データソース抽象インターフェース"""
+
+    @abstractmethod
+    async def get_ohlcv(
+        self, pair: str, timeframe: str, limit: int
+    ) -> list[OHLCV]:
+        """直近N本のOHLCVを取得"""
+
+    @abstractmethod
+    async def get_ticker(self, pair: str) -> Ticker:
+        """最新ティッカーを取得"""
+
+    @abstractmethod
+    async def get_spread(self, pair: str) -> Spread:
+        """最新スプレッドを取得"""
+
+    @abstractmethod
+    async def subscribe_ticks(
+        self, pairs: list[str], callback: Callable[[str, Ticker], Awaitable[None]]
+    ) -> None:
+        """ティックストリーム購読（WebSocket）"""
+
+    @abstractmethod
+    async def get_historical_ohlcv(
+        self, pair: str, timeframe: str, start: datetime, end: datetime
+    ) -> list[OHLCV]:
+        """指定期間のヒストリカルOHLCVを取得"""
+
+    @abstractmethod
+    async def unsubscribe_all(self) -> None:
+        """全ストリーム購読解除"""
+```
+
+**実装クラス:**
+- `GmoFxDataProvider(BaseDataProvider)` - GMOコイン FX
+- `BitbankDataProvider(BaseDataProvider)` - bitbank
+- `HistoricalDataProvider(BaseDataProvider)` - DBからヒストリカルデータを取得（バックテスト用）
+
+**通貨ペア名の正規化:**
+
+```
+内部表現（統一）   GMOコイン      bitbank
+-------------------------------------------------
+USD_JPY            USD_JPY        （対応なし）
+EUR_JPY            EUR_JPY        （対応なし）
+BTC_JPY            BTC_JPY        btc_jpy
+ETH_JPY            ETH_JPY        eth_jpy
+XRP_JPY            XRP_JPY        xrp_jpy
+```
+
+- 内部はアンダースコア区切り大文字（`USD_JPY`）で統一
+- 各DataProviderが取引所固有の形式に変換
+
+---
+
+## 3. Bar Builder
+
+### 3-1. 責務
+
+ティックデータ（またはKLine API応答）からOHLC足を生成し、
+足確定イベントを発行する。
+
+### 3-2. 対応時間足
+
+```
+M1   ... 1分足
+M5   ... 5分足
+M15  ... 15分足
+M30  ... 30分足
+H1   ... 1時間足
+H4   ... 4時間足
+D1   ... 日足
+```
+
+### 3-3. 足生成方式
+
+**方式A: KLine API利用（推奨・通常時）**
+
+GMOコイン・bitbankともにKLine APIでOHLCVを直接取得可能。
+足確定後のポーリング（例: M5足の場合、毎分00秒にM5足APIを呼ぶ）で足データを取得する。
+
+```
+足確定の判定:
+  - 各時間足の確定タイミング（UTC基準）を管理
+  - M1: 毎分00秒
+  - M5: 00/05/10/15/20/25/30/35/40/45/50/55分
+  - M15: 00/15/30/45分
+  - M30: 00/30分
+  - H1: 毎時00分
+  - H4: 00:00/04:00/08:00/12:00/16:00/20:00 (UTC)
+  - D1: 00:00 UTC（GMOコインのD1基準時刻に合わせる）
+```
+
+**方式B: ティック集約（WebSocket受信時）**
+
+WebSocketでティックを受信し、リアルタイムにOHLC足を構築する。
+方式Aの補完として使用（KLine API更新遅延時のフォールバック）。
+
+```python
+@dataclass
+class BarAccumulator:
+    """進行中の足を蓄積するアキュムレータ"""
+    pair: str
+    timeframe: str
+    period_start: datetime        # この足の開始時刻（UTC）
+    open: float | None = None
+    high: float = float('-inf')
+    low: float = float('inf')
+    close: float | None = None
+    volume: float = 0.0
+    tick_count: int = 0
+
+    def update(self, price: float, volume: float) -> None:
+        """ティック受信時に呼ばれる"""
+        if self.open is None:
+            self.open = price
+        self.high = max(self.high, price)
+        self.low = min(self.low, price)
+        self.close = price
+        self.volume += volume
+        self.tick_count += 1
+
+    def finalize(self) -> OHLCV:
+        """足確定時にOHLCVを生成"""
+        return OHLCV(
+            timestamp=self.period_start,
+            open=self.open,
+            high=self.high,
+            low=self.low,
+            close=self.close,
+            volume=self.volume,
+        )
+```
+
+### 3-4. Mid価格算出
+
+GMOコインはBid/Ask両方を提供するため、指標計算用のMid価格を算出する。
+
+```
+mid_price = (bid + ask) / 2
+```
+
+- 指標計算: Mid価格を使用
+- スプレッド計算: Bid/Askの差分を使用（Guard Engineへ提供）
+- 注文価格: Bid/Askそのものを使用（Execution Engineへ提供）
+
+### 3-5. 不完全足（進行中の足）の扱い
+
+```
+- 不完全足は指標計算に使用しない（確定足のみ）
+- UI表示用には不完全足の現在値を提供可能
+- State Builderへの入力は確定足のみ
+```
+
+### 3-6. 足確定イベント
+
+足が確定した時点で以下のイベントを発行する:
+
+```python
+@dataclass
+class BarClosedEvent:
+    """足確定イベント"""
+    pair: str
+    timeframe: str       # M1, M5, M15, M30, H1, H4, D1
+    bar: OHLCV
+    timestamp: datetime  # イベント発行時刻（UTC）
+```
+
+- Indicator Engineが購読して指標を更新
+- Decision Orchestratorが購読してパイプライン実行をトリガー
+
+---
+
+## 4. Indicator Engine（テクニカル指標計算）
+
+### 4-1. 責務
+
+足確定イベントを受け取り、テクニカル指標をインクリメンタルに計算する。
+全指標は足1本追加ごとに差分更新し、全履歴の再計算は不要。
+
+### 4-2. 対象指標一覧
+
+```
+指標名              パラメータ   用途                    計算時間足
+----------------------------------------------------------------------
+EMA(20)             period=20    短期トレンド            全時間足
+EMA(50)             period=50    中期トレンド            全時間足
+EMA(200)            period=200   長期トレンド            H1, H4, D1
+ADX(14)             period=14    トレンド強度            H1, H4, D1
+ATR(14)             period=14    ボラティリティ          全時間足
+Donchian(20)        period=20    チャネルブレイクアウト    H1, H4
+RSI(14)             period=14    相対力指数              M15, H1
+Bollinger(20,2)     period=20    バンド幅・位置          M15, H1
+                    stddev=2
+Swing               lookback=5   スイングハイ/ロー検出    H1, H4
+```
+
+### 4-3. インクリメンタル計算アルゴリズム
+
+**EMA（指数移動平均）:**
+```
+初期値: SMA(period) = mean(close[0:period])
+更新式: EMA_new = close * k + EMA_prev * (1 - k)
+        k = 2 / (period + 1)
+
+保持状態: 前回のEMA値のみ
+```
+
+**ADX（Average Directional Index）:**
+```
+1. +DM / -DM の計算（前日比）
+2. TR（True Range）の計算
+3. Smoothed +DM, -DM, TR（Wilder平滑化: period=14）
+4. +DI = Smoothed(+DM) / Smoothed(TR) * 100
+5. -DI = Smoothed(-DM) / Smoothed(TR) * 100
+6. DX = |+DI - -DI| / (+DI + -DI) * 100
+7. ADX = Wilder平滑化(DX, 14)
+
+保持状態: smoothed_plus_dm, smoothed_minus_dm, smoothed_tr, prev_adx, prev_bar
+```
+
+**ATR（Average True Range）:**
+```
+TR = max(high - low, |high - prev_close|, |low - prev_close|)
+ATR = Wilder平滑化(TR, 14)
+     = ATR_prev * (period - 1) / period + TR / period
+
+保持状態: prev_atr, prev_close
+```
+
+**Donchian Channel(20):**
+```
+upper = max(high[-20:])
+lower = min(low[-20:])
+middle = (upper + lower) / 2
+
+保持状態: 直近20本のhigh/lowリングバッファ
+```
+
+**RSI(14):**
+```
+gain = max(close - prev_close, 0)
+loss = max(prev_close - close, 0)
+avg_gain = (avg_gain_prev * 13 + gain) / 14
+avg_loss = (avg_loss_prev * 13 + loss) / 14
+RS = avg_gain / avg_loss
+RSI = 100 - (100 / (1 + RS))
+
+保持状態: avg_gain, avg_loss, prev_close
+```
+
+**Bollinger Bands(20, 2):**
+```
+middle = SMA(close, 20)
+sigma = stddev(close[-20:], ddof=0)
+upper = middle + 2 * sigma
+lower = middle - 2 * sigma
+
+保持状態: 直近20本のcloseリングバッファ
+```
+
+**Swing High/Low:**
+```
+Swing High: high[i] > high[i-1] and high[i] > high[i-2]
+            and high[i] > high[i+1] and high[i] > high[i+2]
+           （前後2本より高い）
+Swing Low:  逆の条件
+
+保持状態: 直近5本のhigh/lowリングバッファ
+注意: 確認に前後2本必要なため、2本分の遅延が発生
+```
+
+### 4-4. ウォームアップ期間
+
+各指標には最低限必要な足数（ウォームアップ期間）がある。
+足数が不足している場合、指標値はNoneを返す。
+
+```
+指標            最低必要足数    備考
+-----------------------------------------------
+EMA(20)         20              SMA初期値に20本
+EMA(50)         50
+EMA(200)        200             H1で約8日分
+ADX(14)         28              +DM/TR平滑化14 + ADX平滑化14
+ATR(14)         15              TR1本 + 平滑化14本
+Donchian(20)    20
+RSI(14)         15              gain/loss初期値14 + 1本
+Bollinger(20,2) 20
+Swing           5               前後2本
+```
+
+**ウォームアップ中の挙動:**
+- 該当指標はNoneを返す
+- State BuilderはNone指標を含む場合 `tradeAllowed=false` を出力
+- モデル評価（M1〜M4）はスキップ
+
+### 4-5. 指標キャッシュ構造
+
+```python
+@dataclass
+class IndicatorSnapshot:
+    """ある時点の全指標値スナップショット"""
+    pair: str
+    timeframe: str
+    timestamp: datetime                  # 足確定時刻（UTC）
+    values: dict[str, float | None]      # 指標名 → 値
+
+# values の例:
+# {
+#     "ema20": 149.50,
+#     "ema50": 148.80,
+#     "ema200": 145.20,
+#     "adx14": 28.5,
+#     "atr14": 0.35,
+#     "donchian20_upper": 150.20,
+#     "donchian20_lower": 147.80,
+#     "donchian20_middle": 149.00,
+#     "rsi14": 58.3,
+#     "bb20_upper": 150.10,
+#     "bb20_middle": 149.00,
+#     "bb20_lower": 147.90,
+#     "bb20_bandwidth": 1.48,
+#     "swing_high": 150.50,
+#     "swing_low": 147.20,
+# }
+```
+
+- メモリ上にペア×時間足ごとの最新IndicatorSnapshotを保持
+- バックテスト用にDBテーブル（`indicator_snapshots`）に定期保存可能
+
+### 4-6. マルチタイムフレーム構造
+
+各判定段階は異なる時間足の指標を参照する:
+
+```
+M1（方向・レジーム）: D1, H4, H1
+M2（セットアップ）:   H1, M30, M15
+M3（エントリー）:     M5, M1
+M4（退出管理）:       M5, M1
+セーフガード:         M5（ATR）, M1（急変動）, ティック（スプレッド）
+```
+
+Indicator Engineは全時間足の指標を常時計算し、
+各段階が必要な時間足のスナップショットを取得する。
+
+---
+
+## 5. State Builder（数値→状態ラベル変換）
+
+### 5-1. 責務
+
+Indicator Engineが出力する数値指標を、判定パイプラインが消費しやすい
+状態ラベル（カテゴリカル値）に変換する。
+
+AIに渡す情報は「状態ラベル中心、数値は最小限」とする（Excel仕様）。
+
+### 5-2. 出力スキーマ（StateSnapshot）
+
+```python
+@dataclass
+class StateSnapshot:
+    """パイプラインに渡す状態スナップショット"""
+    pair: str
+    timestamp: datetime                    # UTC
+    trade_allowed: bool                    # False: ウォームアップ不足 or データ異常
+
+    # 状態ラベル
+    trend: str                             # "UP" | "DOWN" | "NEUTRAL"
+    regime: str                            # "trend" | "range"
+    volatility: str                        # "low" | "normal" | "high" | "extreme"
+
+    # 各時間足の指標スナップショット
+    indicators: dict[str, IndicatorSnapshot]  # timeframe -> IndicatorSnapshot
+
+    # EMA配列状態（M1判定用）
+    ema_alignment: str                     # "bullish" | "bearish" | "mixed"
+
+    # RSIゾーン（M2判定用）
+    rsi_zone: str                          # "oversold" | "neutral" | "overbought"
+
+    # ボリンジャーバンド位置（M2判定用）
+    bb_position: str                       # "below_lower" | "lower_half" | "middle"
+                                           # | "upper_half" | "above_upper"
+
+    # スイング情報
+    swing_high: float | None
+    swing_low: float | None
+
+    # データ品質
+    data_quality: str                      # "ok" | "degraded" | "missing"
+    quality_issues: list[str]              # 品質問題の詳細
+```
+
+### 5-3. 状態ラベル変換ルール
+
+**trend（トレンド方向）:**
+```
+基準時間足: H1（D1, H4で確認）
+
+UP:
+  - EMA20 > EMA50 > EMA200（3本順配列）
+  - ADX >= 25
+  - 直近スイングでHH（Higher High）とHL（Higher Low）
+
+DOWN:
+  - EMA20 < EMA50 < EMA200（逆順配列）
+  - ADX >= 25
+  - 直近スイングでLH（Lower High）とLL（Lower Low）
+
+NEUTRAL:
+  - 上記いずれにも該当しない
+  - ADX < 20
+  - EMA交差中（配列不明確）
+```
+
+**regime（レジーム）:**
+```
+trend:
+  - ADX >= 25
+  - Donchianチャネル幅がATRの2倍以上
+
+range:
+  - ADX < 20
+  - 価格がDonchianチャネルの中央30%以内で推移
+  - ボリンジャーバンド幅が縮小傾向
+```
+
+**volatility（ボラティリティ）:**
+```
+基準: ATR(14)の現在値を直近20本のATR平均で除した比率
+
+low:     ratio < 0.7
+normal:  0.7 <= ratio <= 1.3
+high:    1.3 < ratio <= 2.0
+extreme: ratio > 2.0
+```
+
+**ema_alignment（EMA配列）:**
+```
+bullish: EMA20 > EMA50 > EMA200
+bearish: EMA20 < EMA50 < EMA200
+mixed:   上記以外
+```
+
+**rsi_zone（RSIゾーン）:**
+```
+oversold:   RSI < 30
+neutral:    30 <= RSI <= 70
+overbought: RSI > 70
+```
+
+**bb_position（ボリンジャーバンド位置）:**
+```
+below_lower: close < bb_lower
+lower_half:  bb_lower <= close < bb_middle
+middle:      close == bb_middle（実質的には中央近辺）
+upper_half:  bb_middle < close <= bb_upper
+above_upper: close > bb_upper
+```
+
+### 5-4. trade_allowed判定
+
+以下のいずれかに該当する場合、`trade_allowed=false`:
+
+```
+1. ウォームアップ不足: 必須指標のいずれかがNone
+2. データ品質異常: data_quality == "missing"
+3. 足欠損: 直近の足に欠損がある
+4. 時刻異常: 最新足のタイムスタンプが現在時刻から大幅に乖離
+```
+
+注: セーフガード（Guard Engine）による停止判定は別途行われる。
+ここでの `trade_allowed` はデータ品質に基づく判定のみ。
+
+### 5-5. タイムトラベル防止【監査2】
+
+State Builderは**時刻T時点で利用可能なデータのみ**を使用する。
+
+```
+ライブモード:
+  - 確定済み足のみ使用（不完全足は除外）
+  - 最新のconfirmed barのtimestamp <= 現在時刻
+
+バックテストモード:
+  - BacktestEngineがシミュレーション時刻Tを管理
+  - State Builderは時刻T以前の足のみ受け取る
+  - T以降のデータは物理的にアクセス不可（DataProviderレベルでフィルタ）
+
+検証:
+  - 13_testing_strategy.md にLook-ahead Biasテストを定義
+```
+
+---
+
+## 6. データ品質管理
+
+### 6-1. 欠損検出
+
+```
+足欠損検出:
+  - 各時間足の期待間隔（M1=60秒, M5=300秒, ...）に対し、
+    前回足からの経過時間が2倍以上の場合に「足欠損」と判定
+  - FX: 週末（土日）・メンテナンス時間は除外
+  - Crypto: 24/365のため、欠損は異常
+
+ティックギャップ検出:
+  - WebSocket受信間隔が異常に長い（例: 30秒以上ティックなし）場合に検知
+  - 接続切断の可能性を警告
+```
+
+### 6-2. 異常値検出
+
+```
+スパイク検出:
+  - 前足closeからの変動率が閾値（例: 1分間で0.5%以上）を超える場合
+  - 指標に使用する前にフラグを立てる（除外はしない、ログ記録のみ）
+
+ゼロ値・負値検出:
+  - OHLCV値がゼロまたは負の場合は異常データとして除外
+  - 直前の正常値で補完
+
+volume異常:
+  - volume=0 の足は価格データの信頼性が低い（薄商い）
+  - ログ記録するが指標計算からは除外しない
+```
+
+### 6-3. 補完ルール
+
+```
+欠損足の補完:
+  - 前値補完（Forward Fill）: 直前足のCloseでOHLC全てを埋める
+  - Volume=0とする
+  - data_quality を "degraded" に設定
+
+補完の上限:
+  - 連続3足以上の欠損: 補完せず data_quality="missing", trade_allowed=false
+  - D1足の欠損: 補完せず data_quality="missing"（日足は重要度が高い）
+```
+
+### 6-4. タイムゾーン正規化
+
+```
+全データのタイムスタンプはUTCに統一:
+  - GMOコイン API: JSTで返却 → UTC変換（-9時間）
+  - bitbank API: UTCで返却 → そのまま
+  - 内部処理: 全てUTC
+  - UI表示時のみ: UTC → JST変換（+9時間）
+
+D1足の基準時刻:
+  - GMOコインのD1足基準に合わせる（通常は日本時間00:00 = UTC 15:00前日）
+  - システム内部ではUTC基準で管理
+  - バックテスト時の一貫性のため、基準時刻は設定で変更可能
+```
+
+---
+
+## 7. コンポーネント間インターフェース
+
+### 7-1. データフロー図
+
+```
+[DataProvider]
+     |
+     | OHLCV / Ticker / Spread
+     v
+[Bar Builder]
+     |
+     | BarClosedEvent (pair, timeframe, OHLCV)
+     v
+[Indicator Engine]
+     |
+     | IndicatorSnapshot (pair, timeframe, values)
+     v
+[State Builder]
+     |
+     | StateSnapshot (pair, trend, regime, volatility, indicators, ...)
+     |
+     +---> [Guard Engine]        ... 03_safeguard_engine.md
+     +---> [Decision Pipeline]   ... 04_decision_pipeline.md
+```
+
+### 7-2. イベント駆動の実行タイミング
+
+```
+ティック受信時:
+  → Bar Builder: 進行中足の更新
+  → Guard Engine: スプレッド監視（SG-010〜012）
+  → UI: 現在値の更新
+
+足確定時（BarClosedEvent）:
+  → Indicator Engine: 指標のインクリメンタル更新
+  → State Builder: 状態ラベルの再計算
+  → Guard Engine: ATR・足ベースのガード評価
+  → Decision Orchestrator: パイプライン実行（M1〜M4）
+
+毎分（タイマー）:
+  → Guard Engine: 時間制御ガード（SG-019〜026）、経済指標フィルタ（SG-027〜031）
+  → Guard Engine: 急変動検知（SG-016〜018）
+```
+
+---
+
+## 8. パフォーマンス設計
+
+### 8-1. メモリ使用量
+
+```
+指標計算の状態保持（1ペア×1時間足あたり）:
+  - EMAx3: float x 3 = 24 bytes
+  - ADX: float x 5 = 40 bytes
+  - ATR: float x 2 = 16 bytes
+  - Donchian: float x 20 x 2 = 320 bytes (リングバッファ)
+  - RSI: float x 3 = 24 bytes
+  - Bollinger: float x 20 = 160 bytes (リングバッファ)
+  - Swing: float x 5 x 2 = 80 bytes (リングバッファ)
+  合計: 約664 bytes
+
+10ペア x 7時間足 = 約46 KB（無視できるレベル）
+```
+
+### 8-2. 計算コスト
+
+```
+足確定時の指標更新（1ペア×1時間足あたり）:
+  - 各指標: O(1)（インクリメンタル更新）
+  - Donchian/Bollinger: O(window_size)（リングバッファからmin/max/stddev）
+  - 合計: 数マイクロ秒
+
+状態ラベル変換:
+  - 全て比較演算: O(1)
+  - 合計: 数マイクロ秒
+
+バックテスト時の大量実行にも耐えうる軽量設計。
+```
+
+### 8-3. 型最適化
+
+```python
+# CLAUDE.md指示に従い、float32を積極使用
+import numpy as np
+
+# 指標計算にはfloat32で十分な精度
+# FXの価格精度: 小数点以下3桁（JPYペア）or 5桁（USDペア）
+# float32の有効桁数: 約7桁 → 十分
+
+PRICE_DTYPE = np.float32
+INDICATOR_DTYPE = np.float32
+```
+
+---
+
+## 9. エラーハンドリング
+
+### 9-1. データソース接続エラー
+
+```
+REST APIエラー:
+  - 429 (Rate Limit): 指数バックオフでリトライ（最大3回）
+  - 500/503: 30秒待機後リトライ（最大3回）
+  - 認証エラー(401): リトライせず、通知メール送信
+  - リトライ上限到達: data_quality="missing", trade_allowed=false
+
+WebSocket切断:
+  - 自動再接続（指数バックオフ: 1s, 2s, 4s, 8s, 16s, max 60s）
+  - 再接続中はKLine APIポーリングにフォールバック
+  - 5分以上再接続不可: 通知メール送信
+
+取引所メンテナンス:
+  - GMOコイン: 定期メンテナンス時間帯を設定で管理
+  - メンテナンス中はデータ取得をスキップ（エラーとしない）
+```
+
+### 9-2. データ異常時の振る舞い
+
+```
+原則: 安全側に倒す
+
+- 指標計算不能: 該当指標=None → trade_allowed=false
+- 足欠損: 補完ルール適用 → data_quality="degraded"
+- 連続欠損: trade_allowed=false
+- 異常値検出: ログ記録 + data_quality="degraded"（即座に停止はしない）
+```
+
+---
+
+## 10. バックテスト対応
+
+### 10-1. HistoricalDataProvider
+
+バックテスト時はDBのhistorical_ohlcvテーブルからデータを取得する。
+
+```python
+class HistoricalDataProvider(BaseDataProvider):
+    """バックテスト用データプロバイダ"""
+
+    def __init__(self, db_session, sim_clock):
+        self.db = db_session
+        self.clock = sim_clock  # シミュレーション時計
+
+    async def get_ohlcv(self, pair, timeframe, limit):
+        """sim_clock.now() 以前のデータのみ返す"""
+        # SELECT ... WHERE pair=? AND timeframe=? AND timestamp <= clock.now()
+        # ORDER BY timestamp DESC LIMIT ?
+        ...
+
+    async def get_historical_ohlcv(self, pair, timeframe, start, end):
+        """指定期間のデータを返す（end <= clock.now() を強制）"""
+        effective_end = min(end, self.clock.now())
+        ...
+```
+
+### 10-2. パイプライン共通化
+
+ライブ・バックテスト共通で同一のBar Builder → Indicator Engine → State Builderを使用する。
+DataProviderの差し替えのみで動作モードを切り替える。
+
+```
+ライブモード:    GmoFxDataProvider → Bar Builder → Indicator Engine → State Builder
+バックテスト:    HistoricalDataProvider → Bar Builder → Indicator Engine → State Builder
+```
+
+---
+
+## 11. 設定項目
+
+### 11-1. データパイプライン設定
+
+```python
+class DataPipelineConfig:
+    """データパイプラインの設定"""
+
+    # Bar Builder
+    d1_base_hour_utc: int = 15         # D1足の基準時刻（UTC）
+    incomplete_bar_to_ui: bool = True  # 不完全足をUIに送信するか
+
+    # Indicator Engine
+    ema_periods: list[int] = [20, 50, 200]
+    adx_period: int = 14
+    atr_period: int = 14
+    donchian_period: int = 20
+    rsi_period: int = 14
+    bb_period: int = 20
+    bb_stddev: float = 2.0
+    swing_lookback: int = 5
+
+    # State Builder閾値
+    trend_adx_threshold: float = 25.0       # ADXがこれ以上でトレンド
+    range_adx_threshold: float = 20.0       # ADXがこれ以下でレンジ
+    volatility_low_ratio: float = 0.7
+    volatility_high_ratio: float = 1.3
+    volatility_extreme_ratio: float = 2.0
+    volatility_atr_lookback: int = 20       # ATR平均の算出窓
+
+    # データ品質
+    max_consecutive_missing_bars: int = 3   # 連続欠損上限
+    tick_gap_warning_seconds: int = 30      # ティックギャップ警告閾値
+    spike_threshold_pct: float = 0.5        # スパイク検出閾値（%）
+
+    # 接続リトライ
+    rest_max_retries: int = 3
+    rest_retry_backoff_base: float = 2.0    # 秒
+    ws_reconnect_max_interval: int = 60     # 秒
+    ws_reconnect_alert_timeout: int = 300   # 秒（5分で通知）
+```
+
+---
+
+## 12. 関連設計書
+
+- `03_safeguard_engine.md` - Guard EngineがStateSnapshot + スプレッド情報を消費
+- `04_decision_pipeline.md` - Decision OrchestratorがStateSnapshotを消費
+- `06_exchange_abstraction.md` - BaseDataProviderの取引所固有実装
+- `07_database_schema.md` - historical_ohlcv, indicator_snapshotsテーブル
+- `09_backtest_simulation.md` - HistoricalDataProvider, バックテスト実行エンジン

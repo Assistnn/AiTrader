@@ -1,0 +1,184 @@
+# 10. フロントエンドアーキテクチャ設計書
+
+## 1. 概要
+
+**技術スタック:**
+- フレームワーク: Next.js（React）
+- 言語: TypeScript
+- 状態管理: Zustand
+- API通信: fetch + SWR
+- WebSocket: ネイティブWebSocket + 再接続ロジック
+- チャート: Lightweight Charts（TradingView）
+- UIライブラリ: Tailwind CSS + shadcn/ui
+
+**画面構成（確定済みUI方針に基づく）:**
+```
+1. ダッシュボード（メイン画面）
+2. トレーダー設定画面（再設計: タブ構造）
+3. 取引履歴画面
+4. 通知設定画面
+5. システム設定画面（セーフガード/コスト管理追加）
+6. バックテスト画面（新規）
+7. パイプラインログ画面（新規）
+8. 設定変更履歴画面（新規）
+```
+
+---
+
+## 2. Figma画面との対応
+
+### 2-1. Figma再現方針
+
+```
+基本方針: Figma画面を再現しつつ、仕様不整合は画面側を調整
+画面修正の実施時期: 設計書完成後の実装フェーズ
+```
+
+### 2-2. 画面別対応
+
+**ダッシュボード**
+```
+Figma: 再現
+追加: トレーダーパネルにパイプライン状態をコンパクト表示
+  - 最新M1/M2判定結果（アイコン+テキスト）
+  - ガード状態（正常/警告/停止）
+```
+
+**トレーダー設定画面**
+```
+Figma: 2カラム・900px幅は踏襲
+変更: 右ペインをタブ構造に再設計
+  Tab 1: 基本情報（T-001〜T-012）
+  Tab 2: M1方向判定 + M2セットアップ
+  Tab 3: M3エントリー + M4退出管理
+  Tab 4: MX統合判定
+```
+
+**取引履歴画面**
+```
+Figma: 再現
+追加: 行クリックで4段階判定詳細を展開表示
+  - M1〜M4の判定結果・_debug情報
+  - セーフガード評価結果
+```
+
+**通知設定画面**
+```
+Figma: ほぼそのまま
+追加: トリガー種別の選択肢（セーフガード発動通知等）
+```
+
+**システム設定画面**
+```
+Figma: 2カラムメニュー構造を踏襲
+追加メニュー: セーフガード / コスト管理 / 経済指標
+```
+
+**新規画面（Figmaテイスト踏襲で新規設計）:**
+```
+- バックテスト: 実行設定 + 結果表示（チャート+テーブル）
+- パイプラインログ: フィルタ付きログビューア
+- 設定変更履歴: before/after diff表示
+```
+
+---
+
+## 3. 状態管理
+
+### 3-1. Zustand Store構成
+
+```typescript
+// トレーダー状態
+interface TraderStore {
+  traders: Trader[];
+  activeTrader: Trader | null;
+  fetchTraders: () => Promise<void>;
+  updateTrader: (id: number, data: Partial<Trader>) => Promise<void>;
+}
+
+// ダッシュボード状態
+interface DashboardStore {
+  summary: DashboardSummary | null;
+  prices: Record<string, PriceTick>;  // WebSocketから更新
+  fetchSummary: () => Promise<void>;
+}
+
+// チャート状態
+interface ChartStore {
+  pair: string;
+  timeframe: string;
+  ohlcv: OHLCV[];
+  indicators: Record<string, number[]>;
+}
+```
+
+### 3-2. WebSocket統合
+
+```typescript
+class TradingWebSocket {
+  private ws: WebSocket | null = null;
+  private reconnectAttempts = 0;
+
+  connect(token: string): void {
+    this.ws = new WebSocket(`wss://host/api/v1/ws?token=${token}`);
+
+    this.ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      switch (msg.channel) {
+        case 'prices':
+          useDashboardStore.getState().updatePrice(msg.pair, msg);
+          break;
+        case 'trader_updates':
+          useTraderStore.getState().handleUpdate(msg);
+          break;
+        case 'alerts':
+          useAlertStore.getState().addAlert(msg);
+          break;
+      }
+    };
+
+    this.ws.onclose = () => this.reconnect();
+  }
+
+  private reconnect(): void {
+    const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 60000);
+    setTimeout(() => this.connect(this.token), delay);
+    this.reconnectAttempts++;
+  }
+}
+```
+
+---
+
+## 4. API通信
+
+### 4-1. SWRによるデータフェッチ
+
+```typescript
+// トレーダー一覧
+function useTraders() {
+  return useSWR('/api/v1/traders', fetcher);
+}
+
+// ダッシュボードサマリ（5秒間隔でリフレッシュ）
+function useDashboardSummary() {
+  return useSWR('/api/v1/dashboard/summary', fetcher, {
+    refreshInterval: 5000,
+  });
+}
+```
+
+### 4-2. 命名規則
+
+```
+API/JSON: lowerCamelCase（Excel仕様準拠）
+TypeScript型: PascalCase
+内部変数: camelCase
+```
+
+---
+
+## 5. 関連設計書
+
+- `01_screen_specification.md` - 画面仕様の詳細
+- `08_api_specification.md` - API呼出し先

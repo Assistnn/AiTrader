@@ -1,0 +1,833 @@
+# 03. セーフガードエンジン設計書
+
+## 1. 概要
+
+Guard Engineは、全取引判定に先立って安全性を評価する最優先コンポーネントである。
+40項目・6カテゴリのセーフガードルールを評価し、取引の許可/拒否/停止を決定する。
+
+**設計思想 - 生存性最優先:**
+```
+優先順位: 強制停止(SafeGuard) > 強制決済(SL/TP/最大保有) > 退出管理 > エントリー判定
+いかなるパイプライン判定結果よりもセーフガードが優先される。
+```
+
+**Guard Engineの位置づけ:**
+```
+StateSnapshot + Ticker/Spread + 損益情報 + 経済指標カレンダー
+  → Guard Engine（40項目評価）
+  → GuardState（各ガードの評価結果）
+  → Decision Orchestrator（GuardStateを参照して実行/スキップ判定）
+```
+
+---
+
+## 2. Guard Engine アーキテクチャ
+
+### 2-1. 評価結果の定義
+
+```python
+from enum import Enum
+
+class GuardResult(Enum):
+    """個別ガードの評価結果"""
+    PASS = "pass"       # 問題なし
+    WARN = "warn"       # 警告（取引は継続、ログ記録）
+    BLOCK = "block"     # 当該注文を拒否
+    HALT = "halt"       # トレーダー自体を停止
+
+class GuardEvaluation:
+    """1つのガードの評価結果"""
+    guard_id: str              # "SG-001" 等
+    result: GuardResult
+    reason: str                # 人間可読な理由
+    details: dict              # 数値詳細（_debug用）
+    timestamp: datetime        # 評価時刻（UTC）
+```
+
+### 2-2. GuardState（集約結果）
+
+```python
+@dataclass
+class GuardState:
+    """Guard Engine全体の評価結果"""
+    entry_allowed: bool          # 新規エントリー可能か
+    force_close: bool            # 強制決済が必要か
+    trader_halted: bool          # トレーダー停止か
+    cooldown_until: datetime | None  # クールダウン期限（UTC）
+    lot_multiplier: float        # ロット倍率（通常1.0、半減時0.5）
+
+    evaluations: list[GuardEvaluation]  # 全ガードの評価結果
+    blocking_guards: list[str]          # BLOCKまたはHALTを返したガードID
+
+    # 集約ロジック:
+    # entry_allowed = not any(e.result in (BLOCK, HALT) for e in evaluations)
+    #                 and not trader_halted and cooldown_until is past
+    # force_close = any(e forces close)
+    # trader_halted = any(e.result == HALT)
+```
+
+### 2-3. 評価フロー
+
+```
+1. 全40ガードをカテゴリ内優先度順に評価
+2. HALTが1つでもあれば → trader_halted=true, entry_allowed=false
+3. BLOCKが1つでもあれば → entry_allowed=false
+4. WARNのみ → entry_allowed=true（ログ記録）
+5. 全評価結果をsafeguard_logsテーブルに記録（監査証跡）
+6. GuardStateをDecision Orchestratorに返す
+```
+
+**早期終了なし（全ガード評価）:**
+HALTが出ても残りのガードを評価する。理由:
+- 全ガードの状態を記録し、問題の全体像を把握可能にする
+- 複数のガードが同時に発火した場合の原因分析に必要
+
+---
+
+## 3. セーフガード全項目定義
+
+### カテゴリ1: 資金保護（SG-001〜SG-009）
+
+**SG-001: 日次最大損失率**
+```
+APIキー:   sg.maxDailyLossPct
+型:        number (%)
+必須:      Y
+デフォルト: 10
+許容範囲:  0-100
+結果:      HALT（停止）
+
+計算ロジック:
+  daily_pnl_pct = (当日実現損益 + 当日含み損益) / capital * 100
+  IF daily_pnl_pct <= -sg.maxDailyLossPct:
+    result = HALT
+    force_close = 設定による（全ポジション強制決済 or 新規禁止のみ）
+
+評価タイミング: 約定後（リアルタイム）
+リセット: 日次（UTC 00:00）
+
+注意:
+  - 「実現損益のみ」か「含み含む」かは本設計では「含み含む」を採用
+  - 含み損益はリアルタイム価格から算出
+```
+
+**SG-002: 月次最大損失率**
+```
+APIキー:   sg.maxMonthlyLossPct
+型:        number (%)
+必須:      Y
+デフォルト: 20
+許容範囲:  0-100
+結果:      HALT
+
+計算ロジック:
+  monthly_pnl_pct = 当月累計損益 / capital * 100
+  IF monthly_pnl_pct <= -sg.maxMonthlyLossPct:
+    result = HALT
+
+評価タイミング: 約定後 / 日次集計
+リセット: 月次（UTC基準で月初）
+```
+
+**SG-003: 最大ドローダウン**
+```
+APIキー:   sg.maxDrawdownPct
+型:        number (%)
+必須:      Y
+デフォルト: 30
+許容範囲:  0-100
+結果:      HALT
+
+計算ロジック:
+  peak_capital = max(過去の資産ピーク)
+  current_capital = capital + 累計実現損益 + 含み損益
+  drawdown_pct = (peak_capital - current_capital) / peak_capital * 100
+  IF drawdown_pct >= sg.maxDrawdownPct:
+    result = HALT
+
+評価タイミング: リアルタイム
+リセット: 手動解除のみ（恒久停止）
+```
+
+**SG-004: 利益達成時停止（有効化）**
+```
+APIキー:   sg.stopOnProfit.enabled
+型:        boolean
+必須:      N
+デフォルト: false
+結果:      HALT（有効時のみ評価）
+```
+
+**SG-005: 利益達成目標率**
+```
+APIキー:   sg.stopOnProfit.targetPct
+型:        number (%)
+必須:      N（SG-004=true時必須）
+デフォルト: 10
+許容範囲:  0-100
+依存:      sg.stopOnProfit.enabled=true
+結果:      HALT
+
+計算ロジック:
+  daily_profit_pct = 当日実現損益 / capital * 100
+  IF daily_profit_pct >= sg.stopOnProfit.targetPct:
+    result = HALT（本日分の利益確保）
+
+評価タイミング: 約定後
+リセット: 日次
+```
+
+**SG-006: 連続損失制御（有効化）**
+```
+APIキー:   sg.consecutiveLoss.enabled
+型:        boolean
+必須:      N
+デフォルト: true
+```
+
+**SG-007: 連続損失回数上限**
+```
+APIキー:   sg.consecutiveLoss.max
+型:        integer (回)
+必須:      N
+デフォルト: 3
+許容範囲:  1-20
+依存:      sg.consecutiveLoss.enabled=true
+結果:      BLOCK（クールダウン）
+
+計算ロジック:
+  consecutive_loss_count: 直近の決済で連続損失した回数
+  IF consecutive_loss_count >= sg.consecutiveLoss.max:
+    result = BLOCK
+    cooldown_until = now + sg.consecutiveLoss.cooldownMin
+
+評価タイミング: 約定後
+リセット: 勝ちトレードでカウンタリセット
+注意: 日跨ぎでもカウント継続（日次リセットしない）
+```
+
+**SG-008: 連続損失クールダウン時間**
+```
+APIキー:   sg.consecutiveLoss.cooldownMin
+型:        integer (分)
+必須:      N
+デフォルト: 60
+許容範囲:  1-1440
+依存:      sg.consecutiveLoss.enabled=true
+
+ロジック: cooldown_until = now + cooldownMin分
+クールダウン中は entry_allowed=false
+```
+
+**SG-009: 連続損失時ロット半減**
+```
+APIキー:   sg.consecutiveLoss.halveLot
+型:        boolean
+必須:      N
+デフォルト: false
+依存:      sg.consecutiveLoss.enabled=true
+
+ロジック:
+  連続損失発火後、lot_multiplier = 0.5
+  次の勝ちトレードでlot_multiplier = 1.0に復帰
+  半減は1回のみ適用（0.25にはしない）
+```
+
+### カテゴリ2: 市場異常検知（SG-010〜SG-018）
+
+**SG-010: 平均スプレッド表示**
+```
+APIキー:   sg.spread.showAvg
+型:        boolean
+デフォルト: true
+結果:      UI表示のみ（ガード評価なし）
+```
+
+**SG-011: 現在スプレッド表示**
+```
+APIキー:   sg.spread.showCurrent
+型:        boolean
+デフォルト: true
+結果:      UI表示のみ（ガード評価なし）
+```
+
+**SG-012: スプレッド異常停止**
+```
+APIキー:   sg.spread.maxMultiple
+型:        number (倍)
+必須:      Y
+デフォルト: 2
+許容範囲:  1-10
+結果:      BLOCK
+
+計算ロジック:
+  avg_spread = 直近N分（デフォルト30分）の平均スプレッド
+  current_spread = 現在のBid/Ask差
+  IF current_spread > avg_spread * sg.spread.maxMultiple:
+    result = BLOCK
+    reason = "SPREAD_TOO_WIDE"
+
+評価タイミング: ティック受信時 / 1秒間隔
+平均窓: 直近30分（設定変更可能）
+```
+
+**SG-013: ATR急増検知（有効化）**
+```
+APIキー:   sg.atrSpike.enabled
+型:        boolean
+デフォルト: true
+```
+
+**SG-014: ATR平均窓**
+```
+APIキー:   sg.atrSpike.lookbackBars
+型:        integer (本)
+デフォルト: 20
+許容範囲:  5-200
+依存:      sg.atrSpike.enabled=true
+```
+
+**SG-015: ATR急増停止**
+```
+APIキー:   sg.atrSpike.maxMultiple
+型:        number (倍)
+デフォルト: 1.8
+許容範囲:  1-10
+依存:      sg.atrSpike.enabled=true
+結果:      BLOCK
+
+計算ロジック:
+  avg_atr = mean(ATR14の直近sg.atrSpike.lookbackBars本)
+  current_atr = 最新ATR14値
+  IF current_atr > avg_atr * sg.atrSpike.maxMultiple:
+    result = BLOCK
+    reason = "ATR_SPIKE"
+
+評価タイミング: M5足確定時
+基準時間足: M5（推奨、設定変更可能）
+```
+
+**SG-016: 急変動検知（有効化）**
+```
+APIキー:   sg.rangeSpike.enabled
+型:        boolean
+デフォルト: true
+```
+
+**SG-017: 急変動検出窓**
+```
+APIキー:   sg.rangeSpike.windowMin
+型:        integer (分)
+デフォルト: 5
+許容範囲:  1-60
+依存:      sg.rangeSpike.enabled=true
+```
+
+**SG-018: 急変動停止閾値**
+```
+APIキー:   sg.rangeSpike.maxPips
+型:        number (pips)
+デフォルト: 50
+許容範囲:  5-500
+依存:      sg.rangeSpike.enabled=true
+結果:      BLOCK
+
+計算ロジック:
+  window_high = max(直近sg.rangeSpike.windowMin分のhigh)
+  window_low = min(直近sg.rangeSpike.windowMin分のlow)
+  range_pips = PriceNormalizer.to_pips(window_high - window_low, pair)
+  IF range_pips >= sg.rangeSpike.maxPips:
+    result = BLOCK
+    reason = "RANGE_SPIKE"
+
+評価タイミング: 毎分
+```
+
+**【監査4】価格サニティチェック（Guard Engine内部ルール）:**
+```
+パイプライン（M3）が提案した注文価格が市場価格から大幅に乖離していないかチェック。
+※ SG-IDは割り当てないが、Guard Engine内で必ず実行する。
+
+ロジック:
+  IF order_type == "limit":
+    deviation_pips = |limit_price - current_mid| in pips
+    IF deviation_pips > ATR14 * 3:
+      result = BLOCK
+      reason = "PRICE_SANITY_CHECK_FAILED"
+```
+
+### カテゴリ3: 取引時間制御（SG-019〜SG-026）
+
+**SG-019: 東京時間外禁止**
+```
+APIキー:   sg.session.blockOutsideTokyo
+型:        boolean
+デフォルト: false
+結果:      BLOCK
+
+東京セッション: 00:00-09:00 JST = 15:00-00:00 UTC (前日)
+夏時間影響: なし（日本は夏時間非採用）
+```
+
+**SG-020: ロンドン時間外禁止**
+```
+APIキー:   sg.session.blockOutsideLondon
+型:        boolean
+デフォルト: false
+結果:      BLOCK
+
+ロンドンセッション:
+  冬: 08:00-16:30 GMT = 08:00-16:30 UTC
+  夏: 08:00-16:30 BST = 07:00-15:30 UTC
+夏時間切替: 3月最終日曜〜10月最終日曜
+```
+
+**SG-021: ニューヨーク時間外禁止**
+```
+APIキー:   sg.session.blockOutsideNewyork
+型:        boolean
+デフォルト: false
+結果:      BLOCK
+
+NYセッション:
+  冬: 08:00-17:00 EST = 13:00-22:00 UTC
+  夏: 08:00-17:00 EDT = 12:00-21:00 UTC
+夏時間切替: 3月第2日曜〜11月第1日曜
+```
+
+**SG-022〜023: セッション開始後バッファ**
+```
+SG-022 APIキー: sg.session.startBuffer.enabled (boolean, デフォルト: false)
+SG-023 APIキー: sg.session.startBuffer.minutes (integer, デフォルト: 15, 範囲: 0-120)
+依存: sg.session.startBuffer.enabled=true
+結果: BLOCK
+
+ロジック: 有効セッションの開始からstartBuffer.minutes分以内はBLOCK
+```
+
+**SG-024〜025: セッション終了前バッファ**
+```
+SG-024 APIキー: sg.session.endBuffer.enabled (boolean, デフォルト: false)
+SG-025 APIキー: sg.session.endBuffer.minutes (integer, デフォルト: 30, 範囲: 0-240)
+依存: sg.session.endBuffer.enabled=true
+結果: BLOCK
+
+ロジック: 有効セッションの終了前endBuffer.minutes分以内はBLOCK
+```
+
+**SG-026: ボラティリティ低下時停止**
+```
+APIキー:   sg.lowVolStop.enabled
+型:        boolean
+デフォルト: false
+結果:      BLOCK
+
+ロジック:
+  State Builder の volatility == "low" の場合:
+    result = BLOCK
+    reason = "LOW_VOLATILITY"
+
+評価タイミング: 足確定時
+```
+
+### カテゴリ4: 経済指標フィルター（SG-027〜SG-031）
+
+**SG-027: 重要指標前停止（有効化）**
+```
+APIキー:   sg.econStop.enabled
+型:        boolean
+デフォルト: true
+```
+
+**SG-028: 重要度フィルタ**
+```
+APIキー:   sg.econStop.minImportance
+型:        integer (星)
+デフォルト: 3
+許容範囲:  1-3
+依存:      sg.econStop.enabled=true
+
+ロジック: importance >= minImportance の指標のみ対象
+```
+
+**SG-029: 発表前停止時間**
+```
+APIキー:   sg.econStop.beforeMin
+型:        integer (分)
+デフォルト: 30
+許容範囲:  0-240
+依存:      sg.econStop.enabled=true
+```
+
+**SG-030: 発表後停止時間**
+```
+APIキー:   sg.econStop.afterMin
+型:        integer (分)
+デフォルト: 15
+許容範囲:  0-240
+依存:      sg.econStop.enabled=true
+```
+
+**SG-031: 対象通貨スコープ**
+```
+APIキー:   sg.econStop.currencyScope
+型:        enum
+デフォルト: USD_ONLY
+候補:      USD_ONLY / ALL
+依存:      sg.econStop.enabled=true
+
+ロジック:
+  USD_ONLY: USD/JPY関連の指標のみ対象
+  ALL: 取引ペアの関連国すべての指標を対象
+
+通貨ペア→関連国マッピング:
+  USD_JPY → USD, JPY
+  EUR_USD → EUR, USD
+  GBP_JPY → GBP, JPY
+  ...
+```
+
+**経済指標カレンダーの統合:**
+```
+結果: BLOCK
+
+計算ロジック:
+  upcoming_events = 経済指標カレンダーから取得
+  FOR event IN upcoming_events:
+    IF event.importance < sg.econStop.minImportance:
+      CONTINUE
+    IF sg.econStop.currencyScope == "USD_ONLY" AND event.currency != "USD":
+      CONTINUE
+    IF event.currency not in pair_currencies(current_pair):
+      CONTINUE
+    time_to_event = event.datetime - now
+    IF -sg.econStop.afterMin <= time_to_event.minutes <= sg.econStop.beforeMin:
+      result = BLOCK
+      reason = f"ECON_EVENT: {event.name}"
+
+データソース:
+  - 外部API（investing.com等の経済指標カレンダーAPI）
+  - 日次バッチでDB（economic_events テーブル）にキャッシュ
+  - 毎分参照
+```
+
+### カテゴリ5: レジーム保護（SG-032〜SG-034）
+
+**SG-032: トレンド崩壊時停止**
+```
+APIキー:   sg.regime.breakStop.enabled
+型:        boolean
+デフォルト: false
+結果:      BLOCK
+
+ロジック:
+  IF H1のtrend == "NEUTRAL" が連続N回（N=3、設定化推奨）:
+    result = BLOCK
+    reason = "TREND_BREAKDOWN"
+
+評価タイミング: H1足確定時
+```
+
+**SG-033: ADX低下時戦略停止**
+```
+APIキー:   sg.regime.adxDropStop.enabled
+型:        boolean
+デフォルト: false
+結果:      BLOCK
+
+ロジック:
+  IF ADX14 < 20（閾値は設定化）:
+    IF current_strategy == "trendFollow":
+      result = BLOCK
+      reason = "ADX_DROP_TREND_STOP"
+
+評価タイミング: H1足確定時
+```
+
+**SG-034: レンジ移行時順張り停止**
+```
+APIキー:   sg.regime.rangeStop.enabled
+型:        boolean
+デフォルト: false
+結果:      BLOCK
+
+ロジック:
+  IF regime == "range" AND setup.preset == "trendFollow":
+    result = BLOCK
+    reason = "RANGE_TREND_STOP"
+
+評価タイミング: M15足確定時
+```
+
+### カテゴリ6: 実行保護（SG-035〜SG-040）
+
+**SG-035: 最大同時ポジション数**
+```
+APIキー:   sg.exec.maxPositions
+型:        integer (件)
+必須:      Y
+デフォルト: 3
+許容範囲:  1-50
+結果:      BLOCK
+
+ロジック:
+  IF open_position_count >= sg.exec.maxPositions:
+    result = BLOCK
+    reason = "MAX_POSITIONS_REACHED"
+
+評価タイミング: エントリー直前
+```
+
+**SG-036: 同方向ポジション制限**
+```
+APIキー:   sg.exec.maxSameDirection
+型:        integer (件)
+デフォルト: 2
+許容範囲:  1-50
+結果:      BLOCK
+
+ロジック:
+  buy_count = 現在のBUYポジション数
+  sell_count = 現在のSELLポジション数
+  IF proposed_side == "BUY" AND buy_count >= maxSameDirection:
+    result = BLOCK
+  IF proposed_side == "SELL" AND sell_count >= maxSameDirection:
+    result = BLOCK
+```
+
+**SG-037: 相関通貨同時禁止**
+```
+APIキー:   sg.exec.blockCorrelated
+型:        boolean
+デフォルト: true
+結果:      BLOCK
+
+相関グループ（固定テーブル、初期定義）:
+  Group A: USD_JPY, EUR_JPY（JPYペア同士）
+  Group B: EUR_USD, GBP_USD（USDペア同士）
+  Group C: AUD_USD, NZD_USD（オセアニアペア）
+
+ロジック:
+  IF proposed_pair の相関グループ内に既存ポジションがある:
+    result = BLOCK
+    reason = "CORRELATED_PAIR_EXISTS"
+```
+
+**SG-038: AI応答遅延時停止**
+```
+APIキー:   sg.aiFailsafe.timeoutStop
+型:        boolean
+デフォルト: true
+結果:      BLOCK / フォールバック
+
+ロジック:
+  IF AI呼び出しがtimeout（3-5秒）を超過:
+    IF sg.aiFailsafe.timeoutStop == true:
+      → ruleモードにフォールバック（BLOCK ではない）
+    ELSE:
+      → BLOCK
+
+評価タイミング: AI呼び出し時
+```
+
+**SG-039: AI出力異常時停止**
+```
+APIキー:   sg.aiFailsafe.invalidOutputStop
+型:        boolean
+デフォルト: true
+結果:      BLOCK / フォールバック
+
+ロジック:
+  IF AI出力がJSONスキーマに不適合:
+    → ruleモードにフォールバック
+  IF パース自体が失敗:
+    → BLOCK + アラート通知
+```
+
+**SG-040: confidence未達時フォールバック**
+```
+APIキー:   sg.aiFailsafe.lowConfidenceFallback
+型:        boolean
+デフォルト: true
+結果:      フォールバック（ruleモードへ）
+
+ロジック:
+  IF AI出力のconfidence < dir.ai.minConfidence（各段階の閾値）:
+    → ruleモードの判定結果を採用
+
+注意: confidenceはAIの自己申告であり過信しない
+```
+
+**【生存性】RRサニティチェック（Guard Engine内部ルール）:**
+```
+※ Excel仕様のSG番号範囲外だが、Guard Engineで必ず評価する。
+
+ロジック:
+  rr_ratio = tp_pips / sl_pips
+  IF rr_ratio < rr_min_threshold（デフォルト0.8）:
+    result = BLOCK
+    reason = "RR_BELOW_MINIMUM"
+
+評価タイミング: M3（エントリー）出力時
+```
+
+**【生存性】ポジションサイズ上限チェック（Guard Engine内部ルール）:**
+```
+ロジック:
+  risk_amount = lot_size * sl_pips * pip_value
+  risk_pct = risk_amount / capital * 100
+  IF risk_pct > exec.riskPerTradePct * 1.1:  # 10%マージン
+    result = BLOCK
+    reason = "POSITION_SIZE_EXCEEDS_RISK_LIMIT"
+
+評価タイミング: M3出力時（PositionSizer計算後）
+```
+
+---
+
+## 4. 評価タイミングマトリクス
+
+```
+タイミング          対象ガード                        トリガー
+-------------------------------------------------------------------
+ティック/1秒        SG-012(スプレッド)                Ticker受信
+                   価格サニティチェック               注文直前
+
+毎分               SG-016-018(急変動)                タイマー
+                   SG-019-025(セッション)             タイマー
+                   SG-027-031(経済指標)               タイマー
+
+足確定時            SG-013-015(ATR急増)               BarClosedEvent(M5)
+                   SG-026(低ボラ)                    BarClosedEvent
+                   SG-032-034(レジーム)               BarClosedEvent(H1/M15)
+
+約定後              SG-001-003(日次/月次/DD)           TradeClosedEvent
+                   SG-004-005(利益達成)               TradeClosedEvent
+                   SG-006-009(連続損失)               TradeClosedEvent
+
+エントリー直前      SG-035-037(ポジション制限)          Pre-Entry Check
+                   SG-038-040(AIフェイルセーフ)        AI呼出後
+                   RRサニティチェック                  M3出力後
+                   ポジションサイズチェック             PositionSizer計算後
+```
+
+---
+
+## 5. ログ記録（監査証跡）
+
+全ガード評価結果はsafeguard_logsテーブルに記録する。
+
+```python
+@dataclass
+class SafeguardLogEntry:
+    """セーフガード評価ログ"""
+    id: int                     # auto increment
+    trader_id: int
+    user_id: int                # 【監査1】テナント隔離
+    pair: str
+    timestamp: datetime         # 評価時刻（UTC）
+    trigger: str                # "tick" / "bar_closed" / "trade_closed" / "pre_entry" / "timer"
+
+    guard_id: str               # "SG-001" 等
+    result: str                 # "pass" / "warn" / "block" / "halt"
+    reason: str                 # 人間可読な理由
+    details_json: str           # 数値詳細（JSON）
+
+    # details_json 例:
+    # {"daily_pnl_pct": -8.5, "threshold": 10, "capital": 1000000}
+```
+
+**ログ保持ポリシー:**
+- BLOCK/HALTの結果: 永久保持
+- WARN: 90日保持
+- PASS: 記録しない（データ量削減）
+
+ただし、パイプライン実行ログ（pipeline_logs）にはGuardState全体が記録されるため、
+PASSの情報もpipeline_logs経由で追跡可能。
+
+---
+
+## 6. 設定の依存関係
+
+```
+sg.stopOnProfit.targetPct       → sg.stopOnProfit.enabled=true
+sg.consecutiveLoss.max          → sg.consecutiveLoss.enabled=true
+sg.consecutiveLoss.cooldownMin  → sg.consecutiveLoss.enabled=true
+sg.consecutiveLoss.halveLot     → sg.consecutiveLoss.enabled=true
+sg.atrSpike.lookbackBars       → sg.atrSpike.enabled=true
+sg.atrSpike.maxMultiple         → sg.atrSpike.enabled=true
+sg.rangeSpike.windowMin         → sg.rangeSpike.enabled=true
+sg.rangeSpike.maxPips           → sg.rangeSpike.enabled=true
+sg.session.startBuffer.minutes  → sg.session.startBuffer.enabled=true
+sg.session.endBuffer.minutes    → sg.session.endBuffer.enabled=true
+sg.econStop.minImportance       → sg.econStop.enabled=true
+sg.econStop.beforeMin           → sg.econStop.enabled=true
+sg.econStop.afterMin            → sg.econStop.enabled=true
+sg.econStop.currencyScope       → sg.econStop.enabled=true
+```
+
+有効化フラグがfalseの場合、依存する設定項目は評価をスキップする。
+
+---
+
+## 7. Guard Engineクラス設計
+
+```python
+class GuardEngine:
+    """セーフガードエンジン"""
+
+    def __init__(self, config: SafeguardConfig, price_normalizer: PriceNormalizer):
+        self.config = config
+        self.normalizer = price_normalizer
+        self.guards = self._build_guards()
+
+    def evaluate_all(
+        self,
+        state: StateSnapshot,
+        ticker: Ticker,
+        account: AccountState,
+        positions: list[Position],
+        economic_events: list[EconomicEvent],
+        proposed_order: ProposedOrder | None = None,
+    ) -> GuardState:
+        """全ガードを評価してGuardStateを返す"""
+        evaluations = []
+        for guard in self.guards:
+            eval_result = guard.evaluate(
+                state=state,
+                ticker=ticker,
+                account=account,
+                positions=positions,
+                economic_events=economic_events,
+                proposed_order=proposed_order,
+            )
+            evaluations.append(eval_result)
+
+        return self._aggregate(evaluations)
+
+    def evaluate_pre_entry(
+        self,
+        proposed_order: ProposedOrder,
+        positions: list[Position],
+    ) -> GuardState:
+        """エントリー直前の追加チェック（ポジション制限等）"""
+        ...
+
+    def _aggregate(self, evaluations: list[GuardEvaluation]) -> GuardState:
+        """評価結果を集約"""
+        trader_halted = any(e.result == GuardResult.HALT for e in evaluations)
+        blocking = [e for e in evaluations if e.result in (GuardResult.BLOCK, GuardResult.HALT)]
+        entry_allowed = len(blocking) == 0 and not trader_halted
+        ...
+```
+
+---
+
+## 8. 関連設計書
+
+- `02_data_pipeline.md` - StateSnapshot, Ticker, Spreadの提供元
+- `04_decision_pipeline.md` - GuardStateを参照してパイプライン実行制御
+- `05_ai_integration.md` - SG-038〜040のAIフェイルセーフ連携
+- `06_exchange_abstraction.md` - PriceNormalizer（pips変換）
+- `07_database_schema.md` - safeguard_configs, safeguard_logsテーブル
+- `14_cost_management.md` - AI呼出レートリミット（ガードとは別管理）

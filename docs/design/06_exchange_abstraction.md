@@ -1,0 +1,614 @@
+# 06. 取引所抽象化設計書
+
+## 1. 概要
+
+FX（GMOコイン）と暗号通貨（bitbank）の差異を吸収する抽象化レイヤーを定義する。
+テスト・バックテスト用のMockExchangeも同一インターフェースで提供する。
+
+**主要コンポーネント:**
+- `BaseExchange` - 取引所操作の共通インターフェース
+- `PriceNormalizer` - FX(pip) / Crypto(小数点) の価格単位を統一
+- `PositionSizer` - 口座残高・リスク%・SL幅からロットサイズを算出
+- `GmoFxExchange` - GMOコイン FX実装
+- `BitbankExchange` - bitbank実装
+- `MockExchange` - テスト/ペーパートレード/バックテスト用
+
+---
+
+## 2. BaseExchange インターフェース
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+
+class OrderSide(Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+class OrderType(Enum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+    STOP = "STOP"
+
+class OrderStatus(Enum):
+    PENDING = "PENDING"
+    FILLED = "FILLED"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+
+@dataclass
+class Order:
+    order_id: str
+    client_order_id: str        # 二重発注防止用
+    pair: str
+    side: OrderSide
+    order_type: OrderType
+    amount: float               # ロットサイズ
+    price: float | None         # LIMIT/STOP時の価格
+    status: OrderStatus
+    filled_amount: float
+    filled_price: float | None  # 約定平均価格
+    created_at: datetime
+    updated_at: datetime
+
+@dataclass
+class Position:
+    position_id: str
+    pair: str
+    side: OrderSide
+    amount: float               # 保有数量
+    entry_price: float          # 平均エントリー価格
+    unrealized_pnl: float       # 含み損益（口座通貨建て）
+    created_at: datetime
+
+@dataclass
+class Balance:
+    total: float                # 総資産（口座通貨建て）
+    available: float            # 利用可能額
+    margin_used: float          # 使用中証拠金
+    unrealized_pnl: float       # 含み損益合計
+    currency: str               # "JPY"
+
+class BaseExchange(ABC):
+    """取引所操作の共通インターフェース"""
+
+    @abstractmethod
+    async def get_ticker(self, pair: str) -> Ticker:
+        """最新ティッカーを取得"""
+
+    @abstractmethod
+    async def get_ohlcv(
+        self, pair: str, timeframe: str, limit: int
+    ) -> list[OHLCV]:
+        """OHLCV足データを取得"""
+
+    @abstractmethod
+    async def place_order(
+        self,
+        pair: str,
+        side: OrderSide,
+        amount: float,
+        order_type: OrderType,
+        price: float | None = None,
+        client_order_id: str | None = None,
+        tp_price: float | None = None,
+        sl_price: float | None = None,
+    ) -> Order:
+        """注文を発行"""
+
+    @abstractmethod
+    async def cancel_order(self, order_id: str) -> bool:
+        """注文をキャンセル"""
+
+    @abstractmethod
+    async def get_order_status(self, order_id: str) -> Order:
+        """注文状態を取得"""
+
+    @abstractmethod
+    async def get_positions(self) -> list[Position]:
+        """保有ポジション一覧を取得"""
+
+    @abstractmethod
+    async def close_position(
+        self, position_id: str, amount: float | None = None
+    ) -> Order:
+        """ポジションを決済（amount指定で部分決済）"""
+
+    @abstractmethod
+    async def get_balance(self) -> Balance:
+        """口座残高を取得"""
+
+    @abstractmethod
+    async def modify_order(
+        self, order_id: str, price: float | None = None
+    ) -> Order:
+        """注文を変更（トレーリングストップのSL変更等）"""
+```
+
+---
+
+## 3. PriceNormalizer
+
+### 3-1. 責務
+
+FX（pip単位）と暗号通貨（小数点単位）の価格計算を統一する。
+pip定義、損益計算、価格の丸め処理を提供。
+
+### 3-2. pip定義
+
+```
+FX通貨ペア:
+  JPYペア（USD_JPY, EUR_JPY等）: 1 pip = 0.01（小数点以下2桁目）
+  USDペア（EUR_USD, GBP_USD等）: 1 pip = 0.0001（小数点以下4桁目）
+
+暗号通貨:
+  BTC_JPY: 1 pip = 1 JPY（整数単位）
+  ETH_JPY: 1 pip = 1 JPY
+  XRP_JPY: 1 pip = 0.001 JPY
+  ※ 通貨ペアごとに定義テーブルを保持
+```
+
+### 3-3. クラス設計
+
+```python
+class PriceNormalizer:
+    """価格単位の正規化"""
+
+    # pip定義テーブル
+    PIP_DEFINITIONS = {
+        # FX
+        "USD_JPY": {"pip_size": 0.01, "pip_digits": 2, "pip_value_per_lot": 100},
+        "EUR_JPY": {"pip_size": 0.01, "pip_digits": 2, "pip_value_per_lot": 100},
+        "GBP_JPY": {"pip_size": 0.01, "pip_digits": 2, "pip_value_per_lot": 100},
+        "EUR_USD": {"pip_size": 0.0001, "pip_digits": 4, "pip_value_per_lot": 1000},
+        "GBP_USD": {"pip_size": 0.0001, "pip_digits": 4, "pip_value_per_lot": 1000},
+        # Crypto
+        "BTC_JPY": {"pip_size": 1, "pip_digits": 0, "pip_value_per_lot": 1},
+        "ETH_JPY": {"pip_size": 1, "pip_digits": 0, "pip_value_per_lot": 1},
+    }
+
+    def to_pips(self, price_diff: float, pair: str) -> float:
+        """価格差をpipsに変換"""
+        pip_size = self.PIP_DEFINITIONS[pair]["pip_size"]
+        return price_diff / pip_size
+
+    def from_pips(self, pips: float, pair: str) -> float:
+        """pipsを価格差に変換"""
+        pip_size = self.PIP_DEFINITIONS[pair]["pip_size"]
+        return pips * pip_size
+
+    def pip_value(self, pair: str, lot_size: float) -> float:
+        """1 pipの損益額（口座通貨建て）を算出"""
+        base_pip_value = self.PIP_DEFINITIONS[pair]["pip_value_per_lot"]
+        return base_pip_value * lot_size
+
+    def round_price(self, price: float, pair: str) -> float:
+        """取引所の最小単位に価格を丸める"""
+        digits = self.PIP_DEFINITIONS[pair]["pip_digits"]
+        return round(price, digits)
+
+    def calculate_pnl(
+        self, entry_price: float, exit_price: float,
+        side: str, amount: float, pair: str
+    ) -> float:
+        """損益を算出（口座通貨建て）"""
+        price_diff = exit_price - entry_price
+        if side == "SELL":
+            price_diff = -price_diff
+        pips = self.to_pips(price_diff, pair)
+        return pips * self.pip_value(pair, amount)
+```
+
+---
+
+## 4. PositionSizer
+
+### 4-1. 責務
+
+口座残高・リスク%・SL幅からロットサイズを算出する。
+**全注文パスで必ず呼ばれ、バイパス不可**（生存性設計）。
+
+### 4-2. クラス設計
+
+```python
+class PositionSizer:
+    """ポジションサイズ算出"""
+
+    def __init__(self, price_normalizer: PriceNormalizer):
+        self.normalizer = price_normalizer
+
+    def calculate(
+        self,
+        pair: str,
+        capital: float,              # 口座残高（JPY）
+        risk_per_trade_pct: float,   # 1回あたりリスク%
+        sl_pips: float,              # ストップロス幅（pips）
+        tp_pips: float,              # テイクプロフィット幅（pips）
+        min_lot: float,              # 取引所最小ロット
+        max_lot: float,              # ユーザー設定上限 or 取引所上限
+    ) -> PositionSizeResult:
+        """ポジションサイズを算出"""
+
+        # 1. リスク金額算出
+        risk_amount = capital * (risk_per_trade_pct / 100)
+
+        # 2. pip_value取得（1ロットあたり1pipの損益額）
+        pip_value_per_lot = self.normalizer.PIP_DEFINITIONS[pair]["pip_value_per_lot"]
+
+        # 3. ロットサイズ算出
+        if sl_pips <= 0 or pip_value_per_lot <= 0:
+            raw_lot = min_lot  # 安全側
+        else:
+            raw_lot = risk_amount / (sl_pips * pip_value_per_lot)
+
+        # 4. クリップ（最小/最大ロット制約）
+        lot_size = max(min_lot, min(raw_lot, max_lot))
+
+        # 5. RR比算出
+        rr_ratio = tp_pips / sl_pips if sl_pips > 0 else 0.0
+
+        # 6. 実際のリスク額（クリップ後）
+        actual_risk = lot_size * sl_pips * pip_value_per_lot
+        actual_risk_pct = (actual_risk / capital * 100) if capital > 0 else 0.0
+
+        return PositionSizeResult(
+            lot_size=lot_size,
+            rr_ratio=rr_ratio,
+            risk_amount=actual_risk,
+            risk_pct=actual_risk_pct,
+            _debug={
+                "capital": capital,
+                "risk_per_trade_pct": risk_per_trade_pct,
+                "target_risk_amount": risk_amount,
+                "sl_pips": sl_pips,
+                "tp_pips": tp_pips,
+                "pip_value_per_lot": pip_value_per_lot,
+                "raw_lot": raw_lot,
+                "clipped_lot": lot_size,
+                "min_lot": min_lot,
+                "max_lot": max_lot,
+                "rr_ratio": rr_ratio,
+                "actual_risk_amount": actual_risk,
+                "actual_risk_pct": actual_risk_pct,
+            },
+        )
+
+@dataclass
+class PositionSizeResult:
+    lot_size: float
+    rr_ratio: float
+    risk_amount: float    # 実際のリスク額（JPY）
+    risk_pct: float       # 実際のリスク%
+    _debug: dict
+```
+
+### 4-3. FX/Cryptoの差異
+
+```
+FX（GMOコイン）:
+  - ロット単位: 10,000通貨（1万通貨=1ロット）
+  - 最小ロット: 0.01（100通貨）
+  - 最大ロット: 取引所制限（通貨ペアにより異なる）
+  - pip_value: JPYペア=100円/ロット/pip
+
+暗号通貨（bitbank）:
+  - ロット単位: 通貨の最小取引単位（BTC: 0.0001等）
+  - pip_value: 通貨ペアにより異なる
+```
+
+---
+
+## 5. GMOコイン実装（GmoFxExchange）
+
+### 5-1. 認証
+
+```python
+class GmoFxExchange(BaseExchange):
+    """GMOコイン FX取引所実装"""
+
+    def __init__(self, api_key: str, api_secret: str):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.base_url = "https://api.coin.z.com"
+
+    def _sign(self, timestamp: str, method: str, path: str, body: str = "") -> str:
+        """HMAC-SHA256署名生成"""
+        text = timestamp + method + path + body
+        return hmac.new(
+            self.api_secret.encode(),
+            text.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _headers(self, method: str, path: str, body: str = "") -> dict:
+        timestamp = str(int(time.time() * 1000))
+        sign = self._sign(timestamp, method, path, body)
+        return {
+            "API-KEY": self.api_key,
+            "API-TIMESTAMP": timestamp,
+            "API-SIGN": sign,
+        }
+```
+
+### 5-2. 注文種別マッピング
+
+```
+BaseExchange              GMOコイン API
+----------------------------------------------
+MARKET                    executionType: "MARKET"
+LIMIT                     executionType: "LIMIT"
+STOP                      executionType: "STOP"
+（OCO/IFD/IFDOCO は拡張対応）
+
+TP/SL設定:
+  - place_order の tp_price/sl_price は、
+    OCO注文（利確+損切を同時発注）として実現
+  - または、メイン注文発行後にSL注文を別途発行
+
+トレーリングストップ:
+  - GMOコイン APIにはトレーリングストップ機能なし
+  - M4退出管理で定期的にSL注文を変更（cancel → re-place）して実現
+  - 変更頻度: M1足確定時（1分ごと）
+```
+
+### 5-3. 高頻度取引制限
+
+```
+GMOコインの注意事項:
+  - 過度な注文頻度でアカウント凍結リスクあり
+  - 設計上の制約:
+    - 注文間隔: 最低2秒以上
+    - 1分間の注文回数: 最大10回
+    - キャンセル→再発注: 最低3秒間隔
+  - Execution Engineにレートリミッターを組み込む
+```
+
+### 5-4. 部分決済
+
+```
+GMOコインは部分決済に対応:
+  - close_position(position_id, amount=partial_amount) で一部決済
+  - 残ポジションは元のposition_idで管理継続
+```
+
+---
+
+## 6. bitbank実装（BitbankExchange）
+
+### 6-1. 概要
+
+```python
+class BitbankExchange(BaseExchange):
+    """bitbank 暗号通貨取引所実装"""
+
+    def __init__(self, api_key: str, api_secret: str):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.base_url = "https://api.bitbank.cc"
+```
+
+### 6-2. FXとの主な差異
+
+```
+bitbank固有の考慮事項:
+  - 現物取引（FXのレバレッジ取引とは異なる）
+  - ポジション概念なし（残高ベース）
+  - SL/TP注文: API直接対応なし → システム側で監視+成行決済
+  - 注文単位: 通貨の最小取引単位
+  - レートリミット: Private API 6回/秒
+```
+
+---
+
+## 7. MockExchange
+
+### 7-1. 用途
+
+```
+1. 単体テスト: 注文・約定のロジック検証
+2. ペーパートレード: 本番データで仮想取引
+3. バックテスト: ヒストリカルデータでの取引シミュレーション
+```
+
+### 7-2. 実装
+
+```python
+class MockExchange(BaseExchange):
+    """テスト/シミュレーション用仮想取引所"""
+
+    def __init__(self, initial_balance: float = 1_000_000):
+        self.balance = initial_balance
+        self.positions: list[Position] = []
+        self.orders: list[Order] = []
+        self.current_prices: dict[str, Ticker] = {}
+        self.trade_history: list[dict] = []
+
+        # シミュレーション設定
+        self.slippage_pips: float = 0.0        # スリッページ（pips）
+        self.fill_delay_ms: float = 0.0        # 約定遅延（ms）
+        self.spread_pips: float = 0.5          # 固定スプレッド
+
+    def set_price(self, pair: str, ticker: Ticker) -> None:
+        """シミュレーション用: 現在価格を設定"""
+        self.current_prices[pair] = ticker
+        self._check_sl_tp()  # SL/TP到達チェック
+
+    async def place_order(self, ...) -> Order:
+        """仮想注文"""
+        # スリッページ適用
+        fill_price = self._apply_slippage(price, side, pair)
+        # 残高チェック
+        # ポジション追加
+        ...
+
+    def _check_sl_tp(self):
+        """価格更新時にSL/TPの到達をチェック"""
+        for pos in self.positions:
+            ticker = self.current_prices.get(pos.pair)
+            if ticker is None:
+                continue
+            # SL到達チェック
+            # TP到達チェック
+            ...
+```
+
+---
+
+## 8. Execution Engine
+
+### 8-1. 責務
+
+Decision Orchestratorの判定結果を受けて、実際の注文を発行・管理する。
+
+```python
+class ExecutionEngine:
+    """注文実行エンジン"""
+
+    def __init__(
+        self,
+        exchange: BaseExchange,
+        normalizer: PriceNormalizer,
+        sizer: PositionSizer,
+    ):
+        self.exchange = exchange
+        self.normalizer = normalizer
+        self.sizer = sizer
+
+    async def execute_entry(
+        self,
+        pipeline_result: PipelineResult,
+        trader_config: TraderConfig,
+        account: AccountState,
+    ) -> ExecutionResult:
+        """エントリー注文を実行"""
+
+        m3 = pipeline_result.m3_output
+
+        # 1. PositionSizer算出（バイパス不可）
+        size_result = self.sizer.calculate(
+            pair=pipeline_result.pair,
+            capital=account.balance,
+            risk_per_trade_pct=trader_config.exec.riskPerTradePct,
+            sl_pips=m3.sl_pips,
+            tp_pips=m3.tp_pips,
+            min_lot=self._get_min_lot(pipeline_result.pair),
+            max_lot=self._get_max_lot(pipeline_result.pair, trader_config),
+        )
+
+        # 2. 二重発注防止（clientOrderId）
+        client_order_id = f"{pipeline_result.execution_id}_{pipeline_result.pair}"
+
+        # 3. 注文発行
+        # レートリミッター確認（GMOコイン高頻度制限対策）
+        await self._rate_limit_check()
+
+        order = await self.exchange.place_order(
+            pair=pipeline_result.pair,
+            side=OrderSide(m3.entry),
+            amount=size_result.lot_size,
+            order_type=OrderType(m3.entry_type.upper()),
+            price=m3.limit_price,
+            client_order_id=client_order_id,
+        )
+
+        # 4. SL/TP注文発行
+        await self._place_sl_tp(order, m3, pipeline_result.pair)
+
+        return ExecutionResult(order=order, size_result=size_result)
+
+    async def execute_exit(
+        self,
+        m4_output: M4Output,
+        position: Position,
+    ) -> ExecutionResult:
+        """退出アクションを実行"""
+
+        if m4_output.action == "EXIT":
+            order = await self.exchange.close_position(position.position_id)
+        elif m4_output.action == "PARTIAL":
+            partial_amount = position.amount * m4_output.partial_pct
+            order = await self.exchange.close_position(
+                position.position_id, amount=partial_amount
+            )
+        elif m4_output.action == "ADJUST_TRAIL":
+            # トレーリングストップSL変更
+            await self._adjust_trailing_stop(position, m4_output)
+        elif m4_output.action == "EXTEND_TP":
+            await self._extend_take_profit(position, m4_output)
+        ...
+```
+
+### 8-2. 二重発注防止
+
+```
+- clientOrderIdをパイプライン実行ごとに一意に生成
+- 同一executionIdで2回目のplace_orderは拒否
+- limit未約定キャンセル: 設定時間（デフォルト5分）経過で自動キャンセル
+```
+
+### 8-3. レートリミッター（GMOコイン対策）
+
+```python
+class OrderRateLimiter:
+    """注文頻度制限"""
+
+    def __init__(self, min_interval_sec: float = 2.0, max_per_minute: int = 10):
+        self.min_interval = min_interval_sec
+        self.max_per_minute = max_per_minute
+        self.recent_orders: list[datetime] = []
+        self.last_order_time: datetime | None = None
+
+    async def wait_if_needed(self) -> None:
+        """必要に応じてウェイト"""
+        now = datetime.utcnow()
+
+        # 最低間隔チェック
+        if self.last_order_time:
+            elapsed = (now - self.last_order_time).total_seconds()
+            if elapsed < self.min_interval:
+                await asyncio.sleep(self.min_interval - elapsed)
+
+        # 1分間の回数チェック
+        one_min_ago = now - timedelta(minutes=1)
+        self.recent_orders = [t for t in self.recent_orders if t > one_min_ago]
+        if len(self.recent_orders) >= self.max_per_minute:
+            wait_until = self.recent_orders[0] + timedelta(minutes=1)
+            await asyncio.sleep((wait_until - now).total_seconds())
+```
+
+---
+
+## 9. 環境モード切替
+
+```python
+def create_exchange(mode: str, config: ExchangeConfig) -> BaseExchange:
+    """環境変数 TRADING_MODE に応じて取引所を生成"""
+
+    if mode == "live":
+        if config.trade_type == "FX":
+            return GmoFxExchange(config.api_key, config.api_secret)
+        else:
+            return BitbankExchange(config.api_key, config.api_secret)
+
+    elif mode == "simulation":
+        # ペーパートレード: 本番価格フィード + MockExchange
+        return MockExchange(initial_balance=config.capital)
+
+    elif mode == "backtest":
+        # バックテスト: ヒストリカルデータ + MockExchange
+        return MockExchange(initial_balance=config.capital)
+```
+
+---
+
+## 10. 関連設計書
+
+- `02_data_pipeline.md` - BaseDataProvider（データ取得はDataProvider側の責務）
+- `04_decision_pipeline.md` - PipelineResult → ExecutionEngine
+- `07_database_schema.md` - exchange_configs, positions, trade_historyテーブル
+- `09_backtest_simulation.md` - MockExchangeのバックテスト活用
+- `11_security.md` - APIキーの暗号化・管理

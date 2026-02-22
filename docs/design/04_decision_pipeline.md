@@ -1,0 +1,787 @@
+# 04. 判定パイプライン設計書
+
+## 1. 概要
+
+4段階パイプライン（M1〜M4）と統合判定（MX）により、取引判断を段階的に行う。
+各段階は統一インターフェース（BaseJudge）を実装し、rule/aiAssist/aiFullの3モードで動作する。
+
+**設計思想の適用:**
+- 原則A: BaseJudgeインターフェース統一 → モジュール差替え容易
+- 原則B: オーケストレーター自動ログ → モジュールにログ実装不要
+- 原則C: Config変更記録 → パラメータチューニング支援
+
+**パイプライン全体フロー:**
+```
+Guard Engine → M1(方向) → M2(セットアップ) → M3(エントリー) → M4(退出)
+                           ↓                                    ↓
+                          MX(統合判定)                    Execution Engine
+```
+
+**優先順位:**
+```
+強制停止(SafeGuard) > 強制決済(SL/TP/最大保有) > 退出管理(M4) > エントリー判定(M3) > セットアップ(M2) > 方向(M1)
+```
+
+---
+
+## 2. BaseJudge インターフェース
+
+### 2-1. 定義
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
+
+@dataclass
+class JudgeInput:
+    """判定入力（各段階で内容が異なる）"""
+    pair: str
+    timestamp: datetime                      # 評価時刻（UTC）
+    state: StateSnapshot                     # 02_data_pipeline.md で定義
+    guard_state: GuardState                  # 03_safeguard_engine.md で定義
+    previous_stages: dict[str, Any]          # 前段階の出力（M2はM1結果を参照等）
+    positions: list[Position]                # 現在保有ポジション
+    account: AccountState                    # 口座状態（残高等）
+
+@dataclass
+class JudgeConfig:
+    """判定設定（各段階で項目が異なる）"""
+    enabled: bool
+    mode: str                                # "rule" / "aiAssist" / "aiFull"
+    timeframes: list[str]                    # 使用する時間足
+    params: dict[str, Any]                   # 段階固有のパラメータ
+
+@dataclass
+class JudgeOutput:
+    """判定出力（各段階で内容が異なる）"""
+    result: dict[str, Any]                   # 段階固有の結果
+    confidence: float                        # 0.0〜1.0
+    reason_codes: list[str]                  # 判定理由コード
+    _debug: dict[str, Any] = field(default_factory=dict)  # デバッグ情報
+
+class BaseJudge(ABC):
+    """判定モジュール基底クラス"""
+
+    @abstractmethod
+    def judge(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
+        """判定を実行して結果を返す"""
+
+    @abstractmethod
+    def describe_config(self) -> dict:
+        """設定項目の説明を返す（UI表示・ドキュメント用）"""
+```
+
+### 2-2. _debug フィールド規約
+
+全モジュール出力に `_debug` フィールドを含める。
+オーケストレーターが自動ログに記録し、オーナーの追跡・デバッグの鍵とする。
+
+```
+_debug に含めるべき情報:
+  - 中間計算値: 判定に使用した指標の実際の値
+  - 判定経路: どの条件分岐を通ったか
+  - 閾値との距離: 閾値ギリギリの判定だったか
+
+_debug 出力例（M1）:
+  {
+    "ema20": 149.50,
+    "ema50": 148.80,
+    "ema200": 145.20,
+    "adx14": 28.5,
+    "atr14": 0.35,
+    "ema_alignment": "bullish",
+    "判定経路": "EMA3本順配列=true → ADX>=25=true → トレンドUP",
+    "閾値との距離": {
+      "adx": "28.5（閾値25を3.5超過）",
+      "atr_ratio": "1.1（normal範囲内）"
+    }
+  }
+```
+
+---
+
+## 3. M1: 方向・レジーム判定
+
+### 3-1. Excel仕様（M1-001〜M1-011）
+
+```
+設定項目                        APIキー                    型         デフォルト
+---------------------------------------------------------------------------------
+M1-001 有効化                   dir.enabled                boolean    true
+M1-002 時間足選択               dir.timeframes             array      [D1,H4,H1]
+M1-003 インジケーター（固定）   dir.indicators             array      (固定)
+M1-004 トレンド方向判定         dir.useTrendDirection      boolean    true
+M1-005 レンジ回避               dir.useRangeAvoid          boolean    true
+M1-006 ボラティリティ判定       dir.useVolatility          boolean    true
+M1-007 AI使用方式               dir.mode                   enum       rule
+M1-008 AIプロバイダー           dir.ai.provider            enum       ChatGPT
+M1-009 モデル名                 dir.ai.model               string     gpt-4
+M1-010 信頼度しきい値           dir.ai.minConfidence       number(%)  70
+M1-011 出力スキーマ             dir.outputSchema           json       (固定)
+```
+
+### 3-2. 入力
+
+```
+時間足: D1, H4, H1（dir.timeframes で設定）
+指標: EMA(20/50/200), ADX(14), ATR(14), Donchian(20)
+前段階: なし（パイプラインの起点）
+```
+
+### 3-3. 出力スキーマ
+
+```python
+@dataclass
+class M1Output:
+    trend: str            # "UP" | "DOWN" | "NEUTRAL"
+    regime: str           # "trend" | "range"
+    volatility: str       # "low" | "normal" | "high" | "extreme"
+    trade_allowed: bool   # false = M2以降スキップ
+    confidence: float     # 0.0〜1.0
+    reason_codes: list[str]
+    _debug: dict
+```
+
+### 3-4. ruleモード判定ロジック
+
+```python
+def judge_rule(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
+    """M1 ruleモード判定"""
+    indicators = {}
+    for tf in config.timeframes:
+        indicators[tf] = input.state.indicators[tf]
+
+    # 主要時間足（H1）の指標を基準に判定
+    h1 = indicators.get("H1", indicators[config.timeframes[-1]])
+
+    # --- トレンド方向判定 ---
+    trend = "NEUTRAL"
+    if config.params.get("useTrendDirection", True):
+        ema20 = h1.values["ema20"]
+        ema50 = h1.values["ema50"]
+        ema200 = h1.values["ema200"]
+        adx = h1.values["adx14"]
+
+        if ema20 > ema50 > ema200 and adx >= 25:
+            trend = "UP"
+        elif ema20 < ema50 < ema200 and adx >= 25:
+            trend = "DOWN"
+
+    # --- レジーム判定 ---
+    regime = "range"
+    adx = h1.values["adx14"]
+    if adx >= 25:
+        regime = "trend"
+
+    # --- ボラティリティ判定 ---
+    volatility = input.state.volatility  # State Builderが算出済み
+
+    # --- tradeAllowed ---
+    trade_allowed = True
+    if config.params.get("useRangeAvoid", True) and regime == "range":
+        trade_allowed = False
+    if config.params.get("useVolatility", True) and volatility == "extreme":
+        trade_allowed = False
+    if not config.enabled:
+        trade_allowed = False
+
+    # --- confidence算出 ---
+    confidence = self._calc_confidence(trend, regime, adx, volatility)
+
+    return JudgeOutput(
+        result={
+            "trend": trend,
+            "regime": regime,
+            "volatility": volatility,
+            "tradeAllowed": trade_allowed,
+        },
+        confidence=confidence,
+        reason_codes=self._build_reason_codes(trend, regime, volatility),
+        _debug={...},  # 中間計算値・判定経路
+    )
+```
+
+### 3-5. aiAssistモード
+
+```
+1. ruleモード判定を実行（上記ロジック）
+2. ruleの結果をコンテキストとしてAIに渡す
+3. AIの応答をパース
+4. confidence < dir.ai.minConfidence → ruleの結果を採用
+5. confidence >= dir.ai.minConfidence → AI結果を採用
+```
+
+### 3-6. aiFullモード（非推奨）
+
+```
+1. 市場データとコンテキストをAIに直接渡す
+2. AIの応答をパース
+3. 異常時はruleモードにフォールバック
+※ UIで警告表示。本番運用での使用は非推奨
+```
+
+---
+
+## 4. M2: セットアップ判定
+
+### 4-1. Excel仕様（M2-001〜M2-008）
+
+```
+設定項目                        APIキー                    型         デフォルト
+---------------------------------------------------------------------------------
+M2-001 有効化                   setup.enabled              boolean    true
+M2-002 時間足選択               setup.timeframes           array      [H1,M30,M15]
+M2-003 戦略プリセット           setup.preset               enum       trendFollow
+M2-004 Advanced有効化           setup.advanced.enabled     boolean    false
+M2-005 インジケーター（固定）   setup.indicators           array      (固定)
+M2-006 AI使用方式               setup.mode                 enum       rule
+M2-007 確率しきい値             setup.minProbability       number(%)  60
+M2-008 出力スキーマ             setup.outputSchema         json       (固定)
+```
+
+### 4-2. 入力
+
+```
+時間足: H1, M30, M15（setup.timeframes で設定）
+指標: EMA(20/50), RSI(14), Bollinger(20,2), ATR(14), Swing
+前段階: M1の出力（trend, regime, tradeAllowed）
+```
+
+### 4-3. 出力スキーマ
+
+```python
+@dataclass
+class M2Output:
+    setup_valid: bool       # セットアップ成立か
+    setup_type: str         # "trendFollow" | "pullback" | "breakout" | "meanReversion"
+    probability: float      # 0.0〜1.0（セットアップ成功確率推定）
+    confidence: float       # 0.0〜1.0
+    reason_codes: list[str]
+    _debug: dict
+```
+
+### 4-4. 戦略プリセット別ruleモードロジック
+
+**trendFollow（トレンドフォロー）:**
+```
+前提: M1.trend == "UP" or "DOWN"
+条件:
+  - EMA20 > EMA50（UPの場合）
+  - RSI: 40-70（過熱していない）
+  - 価格がEMA20付近（押し目/戻り）
+  - ADX > 20（トレンドあり）
+成立: 全条件Pass → setupValid=true
+```
+
+**pullback（押し目買い/戻り売り）:**
+```
+前提: M1.trend != "NEUTRAL"
+条件:
+  - 価格がEMA50付近まで調整（EMA50 ± ATR*0.5以内）
+  - RSI: 30-50（UPの場合。DOWNなら50-70）
+  - Bollinger下限〜中央（UPの場合）
+成立: 全条件Pass → setupValid=true, setupType="pullback"
+```
+
+**breakout（ブレイクアウト）:**
+```
+条件:
+  - 価格がDonchian(20)のupper or lowerを突破
+  - Volume増加（前5本平均の1.5倍以上）
+  - ADX上昇中
+成立: 全条件Pass → setupValid=true, setupType="breakout"
+```
+
+**meanReversion（平均回帰）:**
+```
+前提: M1.regime == "range"
+条件:
+  - RSI < 30（買い）or RSI > 70（売り）
+  - 価格がBollinger下限以下（買い）or 上限以上（売り）
+  - ATRが低〜通常（ボラティリティ急増時は不成立）
+成立: 全条件Pass → setupValid=true, setupType="meanReversion"
+```
+
+---
+
+## 5. M3: 実行・エントリー判定
+
+### 5-1. Excel仕様（M3-001〜M3-008）
+
+```
+設定項目                        APIキー                    型         デフォルト
+---------------------------------------------------------------------------------
+M3-001 有効化                   exec.enabled               boolean    true
+M3-002 時間足選択               exec.timeframes            array      [M5,M1]
+M3-003 エントリー方式           exec.orderType             enum       market
+M3-004 TP/SL方式                exec.tpSlMode              enum       atr
+M3-005 1回あたりリスク          exec.riskPerTradePct       number(%)  2
+M3-006 実行前チェック           exec.requiredGuards        array      [spreadLimit,...]
+M3-007 AI使用方式               exec.mode                  enum       rule
+M3-008 出力スキーマ             exec.outputSchema          json       (固定)
+```
+
+### 5-2. 入力
+
+```
+時間足: M5, M1（exec.timeframes で設定）
+指標: M5の全指標 + M1は監視用
+前段階: M1の出力（trend, regime） + M2の出力（setupValid, setupType）
+追加: 口座残高、リスク設定、現在ポジション
+```
+
+### 5-3. 出力スキーマ
+
+```python
+@dataclass
+class M3Output:
+    entry: str              # "BUY" | "SELL" | "NO_TRADE"
+    entry_type: str         # "market" | "limit"
+    limit_price: float | None  # limit時のみ
+    tp_pips: float          # テイクプロフィット（pips）
+    sl_pips: float          # ストップロス（pips）
+    lot_size: float         # ポジションサイズ（PositionSizer算出）
+    risk_reward_ratio: float  # tp_pips / sl_pips
+    confidence: float       # 0.0〜1.0
+    reason_codes: list[str]
+    _debug: dict
+```
+
+### 5-4. TP/SL算出ロジック
+
+```
+fixedPips方式:
+  tp_pips = config.params["tpFixedPips"]   # ユーザー設定値
+  sl_pips = config.params["slFixedPips"]   # ユーザー設定値
+
+atr方式（推奨）:
+  atr_pips = PriceNormalizer.to_pips(ATR14_M5, pair)
+  tp_pips = atr_pips * tp_multiplier   # デフォルト: 1.5
+  sl_pips = atr_pips * sl_multiplier   # デフォルト: 1.0
+```
+
+### 5-5. 【生存性】ポジションサイジング計算
+
+**全注文パスで必ず実行される（モード問わず、バイパス不可）:**
+
+```python
+def calculate_position_size(
+    capital: float,              # 口座残高（JPY）
+    risk_per_trade_pct: float,   # exec.riskPerTradePct（デフォルト2%）
+    sl_pips: float,              # ストップロス幅（pips）
+    pip_value: float,            # 1pipあたりの価値（PriceNormalizerから取得）
+    min_lot: float,              # 取引所の最小ロット
+    max_lot: float,              # 取引所の最大ロット / ユーザー設定上限
+) -> tuple[float, dict]:
+    """
+    ポジションサイズ算出
+
+    Returns:
+        (lot_size, _debug_info)
+    """
+    risk_amount = capital * (risk_per_trade_pct / 100)
+    raw_lot = risk_amount / (sl_pips * pip_value)
+    lot_size = max(min_lot, min(raw_lot, max_lot))  # クリップ
+
+    rr_ratio = tp_pips / sl_pips
+
+    _debug = {
+        "capital": capital,
+        "risk_pct": risk_per_trade_pct,
+        "risk_amount": risk_amount,
+        "sl_pips": sl_pips,
+        "pip_value": pip_value,
+        "raw_lot": raw_lot,
+        "clipped_lot": lot_size,
+        "min_lot": min_lot,
+        "max_lot": max_lot,
+        "rr_ratio": rr_ratio,
+    }
+
+    return lot_size, _debug
+```
+
+**固定ロットとの排他制御（Excel T-005注記）:**
+- `exec.riskPerTradePct` が設定されている場合: リスク%ベースで算出
+- `orderUnitLots`（T-005）のみ設定: 固定ロット
+- 両方設定: `riskPerTradePct` を優先（安全側）
+
+---
+
+## 6. M4: 退出管理
+
+### 6-1. Excel仕様（M4-001〜M4-009）
+
+```
+設定項目                        APIキー                    型         デフォルト
+---------------------------------------------------------------------------------
+M4-001 有効化                   exit.enabled               boolean    true
+M4-002 時間足選択               exit.timeframes            array      [M5,M1]
+M4-003 管理方式                 exit.mode                  enum       rule
+M4-004 ブレイクイーブン         exit.rule.breakEven        boolean    true
+M4-005 トレーリングストップ     exit.rule.trailing         boolean    true
+M4-006 部分利益確定             exit.rule.partial          boolean    true
+M4-007 最大保有時間             exit.rule.maxHold          boolean    true
+M4-008 AI許可操作               exit.ai.allowedOps         array      [extendTp,...]
+M4-009 出力スキーマ             exit.outputSchema          json       (固定)
+```
+
+### 6-2. 入力
+
+```
+時間足: M5, M1
+前段階: なし（保有ポジション情報が主入力）
+追加: 現在ポジション（エントリー価格、TP/SL、含み損益等）
+```
+
+### 6-3. 出力スキーマ
+
+```python
+@dataclass
+class M4Output:
+    action: str              # "HOLD" | "EXIT" | "PARTIAL" | "ADJUST_TRAIL" | "EXTEND_TP"
+    tp_adjust_pips: float | None  # TP調整幅
+    trail_mode: str | None   # "ON" | "OFF" | None
+    partial_pct: float | None  # 部分決済率（0.0〜1.0）
+    confidence: float
+    reason_codes: list[str]
+    _debug: dict
+```
+
+### 6-4. ruleモード退出ロジック
+
+**ブレイクイーブン（exit.rule.breakEven=true）:**
+```
+条件: 含み益 >= ATR14 * breakeven_trigger_multiplier（デフォルト1.0）
+操作: SLを建値 + δ（デフォルト: 1 pip）に移動
+制約: 1ポジションにつき1回のみ実行（往復ビンタ防止）
+```
+
+**トレーリングストップ（exit.rule.trailing=true）:**
+```
+条件: 含み益 >= ATR14 * trail_start_multiplier（デフォルト1.5）
+操作: SLを最高益 - trail_distance（ATR14 * trail_multiplier）に追従
+制約:
+  - SLは現在値より有利な方向にのみ移動（不利な方向には動かさない）
+  - GMOコインはトレーリングストップAPI非提供のため、
+    STOP注文の変更（cancelOrder → placeOrder）で実現
+```
+
+**部分利益確定（exit.rule.partial=true）:**
+```
+条件: 含み益 >= TP * partial_trigger_pct（デフォルト50%到達）
+操作: ポジションのpartial_close_pct（デフォルト50%）を決済
+  残りポジション: トレーリングストップに移行
+制約:
+  - 部分決済後、残ポジのSL/TPを再計算
+  - 残ポジのSLはブレイクイーブン以上に設定
+```
+
+**最大保有時間（exit.rule.maxHold=true）:**
+```
+条件: ポジション保有時間 > max_hold_minutes（設定値）
+操作: 強制クローズ（成行決済）
+制約:
+  - 週末跨ぎ: 金曜終了前に強制決済（FXの場合）
+  - 夏時間考慮
+```
+
+### 6-5. M4が無効（exit.enabled=false）の場合
+
+```
+exit.enabled=false でも以下は必ず動作:
+  - SL/TP到達時の決済（これはExecution Engine側の責務）
+  - 最大保有時間による強制決済（セーフガード扱い）
+  - Guard EngineのHALT時の強制決済
+
+exit.enabled=false の場合、M4のrule判定はスキップされるが、
+上記の最低限の退出ルールは継続適用される。
+```
+
+---
+
+## 7. MX: 統合判定ロジック
+
+### 7-1. Excel仕様（MX-001〜MX-005）
+
+```
+設定項目                   APIキー                     型         デフォルト
+---------------------------------------------------------------------------------
+MX-001 判定方式            integrate.mode              enum       dir+setup
+MX-002 スコア重み:方向     integrate.weight.dir        number     2
+MX-003 スコア重み:セットアップ integrate.weight.setup  number     1
+MX-004 スコア重み:実行     integrate.weight.exec       number     1
+MX-005 スコアしきい値      integrate.scoreThreshold    number     3
+```
+
+### 7-2. 判定方式
+
+**all（全一致）:**
+```
+M1.tradeAllowed == true
+AND M2.setupValid == true
+AND M3.entry != "NO_TRADE"
+→ 注文実行
+それ以外 → スキップ
+```
+
+**dir+setup（方向+セットアップ、推奨）:**
+```
+M1.tradeAllowed == true AND M2.setupValid == true
+→ M3を実行してエントリー判定
+M1 or M2が不成立 → M3はスキップ
+```
+
+**score（スコア方式）:**
+```
+score = Σ(weight_i * pass_i * confidence_i)
+
+pass_i:
+  M1: 1 if tradeAllowed else 0
+  M2: 1 if setupValid else 0
+  M3: 1 if entry != "NO_TRADE" else 0
+
+score >= integrate.scoreThreshold → 注文実行
+
+例:
+  M1: pass=1, confidence=0.85, weight=2 → 1.70
+  M2: pass=1, confidence=0.72, weight=1 → 0.72
+  M3: pass=1, confidence=0.80, weight=1 → 0.80
+  score = 3.22 >= 3 → PASS
+```
+
+---
+
+## 8. Decision Orchestrator（オーケストレーター）
+
+### 8-1. 責務
+
+4段階パイプラインの実行制御と自動ログ記録を行う中央制御コンポーネント。
+
+### 8-2. 実行フロー
+
+```python
+class DecisionOrchestrator:
+    """パイプラインオーケストレーター"""
+
+    def __init__(self, judges: dict[str, BaseJudge], guard_engine: GuardEngine):
+        self.m1 = judges["m1"]
+        self.m2 = judges["m2"]
+        self.m3 = judges["m3"]
+        self.m4 = judges["m4"]
+        self.guard_engine = guard_engine
+
+    async def execute_pipeline(
+        self,
+        pair: str,
+        state: StateSnapshot,
+        account: AccountState,
+        positions: list[Position],
+        trader_config: TraderConfig,
+    ) -> PipelineResult:
+        """パイプライン全体を実行"""
+        execution_id = generate_uuid()
+
+        # 0. Guard Engine評価
+        guard_state = self.guard_engine.evaluate_all(state, ...)
+        if guard_state.trader_halted:
+            return PipelineResult(action="HALTED", execution_id=execution_id)
+
+        # 1. M1: 方向判定
+        m1_output = await self._execute_stage(
+            "m1", self.m1, input, trader_config.m1_config, execution_id
+        )
+        if not m1_output.result["tradeAllowed"]:
+            return PipelineResult(action="NO_TRADE", execution_id=execution_id)
+
+        # 2. M2: セットアップ判定
+        input.previous_stages["m1"] = m1_output
+        m2_output = await self._execute_stage(
+            "m2", self.m2, input, trader_config.m2_config, execution_id
+        )
+
+        # 3. MX統合判定（dir+setupの場合）
+        if trader_config.mx_config.mode == "dir+setup":
+            if not m2_output.result["setupValid"]:
+                return PipelineResult(action="NO_TRADE", execution_id=execution_id)
+
+        # 4. M3: エントリー判定
+        input.previous_stages["m2"] = m2_output
+        m3_output = await self._execute_stage(
+            "m3", self.m3, input, trader_config.m3_config, execution_id
+        )
+        if m3_output.result["entry"] == "NO_TRADE":
+            return PipelineResult(action="NO_TRADE", execution_id=execution_id)
+
+        # 5. エントリー直前Guard Check
+        proposed_order = self._build_order(m3_output)
+        pre_entry_guard = self.guard_engine.evaluate_pre_entry(proposed_order, positions)
+        if not pre_entry_guard.entry_allowed:
+            return PipelineResult(action="BLOCKED", execution_id=execution_id)
+
+        return PipelineResult(
+            action="ENTRY",
+            order=proposed_order,
+            execution_id=execution_id,
+        )
+
+    async def execute_exit_management(
+        self,
+        position: Position,
+        state: StateSnapshot,
+        trader_config: TraderConfig,
+    ) -> M4Output:
+        """M4退出管理の実行"""
+        ...
+```
+
+### 8-3. 自動ログ記録（原則B）
+
+```python
+async def _execute_stage(
+    self,
+    stage: str,
+    judge: BaseJudge,
+    input: JudgeInput,
+    config: JudgeConfig,
+    execution_id: str,
+) -> JudgeOutput:
+    """各段階を実行し、自動でログを記録"""
+    start_time = time.monotonic()
+
+    output = judge.judge(input, config)
+
+    elapsed_ms = (time.monotonic() - start_time) * 1000
+
+    # --- 自動ログ記録（モジュール側は何もしなくてよい） ---
+    log_entry = PipelineLogEntry(
+        execution_id=execution_id,
+        trader_id=input.trader_id,
+        user_id=input.user_id,
+        pair=input.pair,
+        timestamp=input.timestamp,
+        stage=stage,                           # "m1" / "m2" / "m3" / "m4"
+        mode=config.mode,                      # "rule" / "aiAssist" / "aiFull"
+        input_snapshot=serialize(input),        # JSON
+        output_snapshot=serialize(output),      # JSON（_debug含む）
+        config_snapshot=serialize(config),      # JSON
+        elapsed_ms=elapsed_ms,
+    )
+    await self.log_repository.save(log_entry)
+
+    return output
+```
+
+**記録される情報:**
+```
+execution_id:     パイプライン実行単位の一意ID
+trader_id:        トレーダーID
+user_id:          ユーザーID（テナント隔離）
+pair:             通貨ペア
+timestamp:        評価時刻（UTC）
+stage:            "m1" / "m2" / "m3" / "m4"
+mode:             "rule" / "aiAssist" / "aiFull"
+input_snapshot:   入力データのJSON
+output_snapshot:  出力データのJSON（_debug含む）
+config_snapshot:  使用されたパラメータのJSON
+elapsed_ms:       処理時間
+```
+
+これによりオーナーが追跡可能な例:
+- 「M1はUP判定したのにM2でセットアップ不成立。理由はRSIが70超で過熱判定」
+- 「ADXの閾値を25→20に下げたらエントリー回数が1.5倍に増えた」
+
+---
+
+## 9. パイプライン制御フロー
+
+### 9-1. 早期終了
+
+```
+Guard HALT        → 全スキップ、トレーダー停止
+M1 不許可         → M2〜M4スキップ
+M2 不成立         → M3スキップ（dir+setup/allモード時）
+M3 NO_TRADE       → エントリーなし
+エントリー前Guard → BLOCK時はエントリーキャンセル
+```
+
+### 9-2. イベントトリガー
+
+```
+新規エントリー評価:
+  トリガー: 足確定（M5が主、M15/H1も参照）
+  実行: M1 → M2 → MX → M3 → Guard → Execution
+
+退出管理（M4）:
+  トリガー: M1足確定 / M5足確定 / ポジション変化
+  実行: M4 → Guard → Execution
+
+セーフガード:
+  トリガー: ティック / 毎分タイマー / 約定イベント
+  実行: Guard Engine評価 → 必要時に強制決済
+```
+
+### 9-3. 各段階の実行間隔
+
+```
+M1（方向判定）: H1足確定時（1時間に1回）
+M2（セットアップ）: M15足確定時（15分に1回）
+M3（エントリー）: M5足確定時（5分に1回）※ M1+M2がPASS時のみ
+M4（退出管理）: M1足確定時（1分に1回）※ ポジション保有時のみ
+```
+
+---
+
+## 10. Config変更記録（原則C）
+
+### 10-1. 変更の検出と記録
+
+```python
+async def update_stage_config(
+    self,
+    trader_id: int,
+    stage: str,
+    new_config: JudgeConfig,
+    user_id: int,
+    change_reason: str | None = None,
+) -> None:
+    """設定変更を記録"""
+    current_config = await self.config_repo.get(trader_id, stage)
+
+    change_entry = ConfigChangeEntry(
+        trader_id=trader_id,
+        user_id=user_id,
+        stage=stage,
+        config_before=serialize(current_config),
+        config_after=serialize(new_config),
+        changed_at=utc_now(),
+        change_reason=change_reason,
+    )
+    await self.config_change_repo.save(change_entry)
+    await self.config_repo.update(trader_id, stage, new_config)
+```
+
+### 10-2. 活用例
+
+```
+- 「先週のパラメータに戻す」
+    → config_changesから該当期間の変更を逆適用
+
+- 「変更前後の成績比較」
+    → 変更日時の前後のtrade_historyを集計して比較
+
+- 「当時のパラメータでバックテスト再実行」
+    → config_changesからバックテスト対象期間のパラメータを復元
+```
+
+---
+
+## 11. 関連設計書
+
+- `02_data_pipeline.md` - StateSnapshot（パイプラインの入力）
+- `03_safeguard_engine.md` - GuardState（パイプライン実行前の安全チェック）
+- `05_ai_integration.md` - aiAssist/aiFullモードのAI呼出実装
+- `06_exchange_abstraction.md` - PositionSizer, PriceNormalizer, Execution Engine
+- `07_database_schema.md` - pipeline_logs, config_changes, model_stage_configsテーブル

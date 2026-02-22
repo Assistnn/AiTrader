@@ -1,0 +1,582 @@
+# 05. AI統合設計書
+
+## 1. 概要
+
+本設計書はAI（LLM）の呼出条件、プロンプト構成、出力パース、フェイルセーフを定義する。
+
+**核心方針:**
+- ruleモードではAIを一切呼ばない（コストゼロ、完全決定論的）
+- aiAssistモード: ルール判定結果をコンテキストとしてAIに渡し、最終確認
+- aiFullモード: AIが主判断（非推奨、UIで警告表示）
+- AIは「補助」であり「主役」ではない
+
+**監査対応:**
+- 【監査3】プロンプトインジェクション対策（サニタイズ+バリデーション）
+- 【監査4】フェイルセーフ（異常時はHOLD、判断不能時は何もしない）
+- 【監査4】レートリミット+コスト予算（14_cost_management.md と連携）
+
+---
+
+## 2. AI呼出条件
+
+### 2-1. モード別呼出ルール
+
+```
+ruleモード:
+  → AI呼出しなし
+  → 全判定はPython決定論的処理
+  → コストゼロ
+
+aiAssistモード:
+  → ruleモード判定を先に実行
+  → ルール結果をコンテキストとしてAIに渡す
+  → AIのconfidence >= 閾値: AI結果を採用
+  → AIのconfidence < 閾値: ルール結果にフォールバック
+  → AI呼出失敗時: ルール結果にフォールバック
+
+aiFullモード（非推奨）:
+  → 市場データとコンテキストをAIに直接渡す
+  → AIの判断を採用
+  → 異常時はruleモードにフォールバック
+  → UIで「非推奨」警告を常時表示
+```
+
+### 2-2. イベント駆動の呼出タイミング
+
+```
+M1（方向判定）: H1足確定時（最大1回/時間）
+M2（セットアップ）: M15足確定時 かつ M1がPASS時のみ
+M3（エントリー）: M5足確定時 かつ M1+M2がPASS時のみ
+M4（退出管理）: ポジション保有中のイベント時のみ
+
+→ 毎分呼ぶことは絶対にない（イベント駆動に固定）
+→ 条件未達時はAI呼出しをスキップ（無駄なAPI消費を防止）
+```
+
+---
+
+## 3. AI Provider 抽象化
+
+### 3-1. BaseAIProvider インターフェース
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+@dataclass
+class AIRequest:
+    """AI呼出リクエスト"""
+    system_prompt: str
+    user_prompt: str
+    temperature: float = 0.1
+    max_tokens: int = 300
+    timeout_seconds: float = 5.0
+
+@dataclass
+class AIResponse:
+    """AI応答"""
+    raw_text: str                # 生の応答テキスト
+    parsed_json: dict | None     # パース済みJSON（パース失敗時はNone）
+    model: str                   # 使用されたモデル名
+    tokens_input: int            # 入力トークン数
+    tokens_output: int           # 出力トークン数
+    latency_ms: float            # 応答時間
+
+class BaseAIProvider(ABC):
+    """AIプロバイダ抽象インターフェース"""
+
+    @abstractmethod
+    async def call(self, request: AIRequest) -> AIResponse:
+        """AI呼出し"""
+
+    @abstractmethod
+    def provider_name(self) -> str:
+        """プロバイダ名を返す"""
+```
+
+### 3-2. 実装クラス
+
+```
+OpenAIProvider(BaseAIProvider)    ... ChatGPT / GPT-4
+GeminiProvider(BaseAIProvider)    ... Google Gemini
+ClaudeProvider(BaseAIProvider)    ... Anthropic Claude
+MockAIProvider(BaseAIProvider)    ... テスト・バックテスト用
+```
+
+### 3-3. AIプロバイダ設定（ユーザーごと）
+
+```
+各段階（M1〜M4）に個別のプロバイダ/モデルを設定可能:
+  dir.ai.provider  / dir.ai.model
+  setup.ai.provider / setup.ai.model（存在しないが拡張可能）
+  exec.ai.provider / exec.ai.model（同上）
+  exit.ai.provider / exit.ai.model（同上）
+```
+
+---
+
+## 4. プロンプト構成
+
+### 4-1. 4層構造
+
+```
+Layer 1: システムプロンプト（固定、system_default_promptsテーブル）
+  → JSON出力強制
+  → 安全制約（SLの緩和禁止等）
+  → 出力スキーマの厳密指定
+
+Layer 2: ユーザー戦略プロンプト（strategy_prompt, max 2000文字）
+  → トレーダー設定（T-006: strategyText）から取得
+  → 【監査3】サニタイズ必須
+
+Layer 3: 構造化コンテキスト（動的生成）
+  → 現在の指標値・状態ラベル・ポジション情報
+  → JSON形式で構造化
+
+Layer 4: ruleモード判定結果（aiAssist時のみ）
+  → ルール判定の結果とreason_codesを追加
+  → AIに「ルールはこう判断した。同意するか？」と問う
+```
+
+### 4-2. 各段階のシステムプロンプト
+
+**M1（方向・レジーム）システムプロンプト:**
+```
+あなたはFX市場の方向・レジーム分析の専門家です。
+提供された市場データに基づき、以下のJSON形式のみで応答してください。
+
+出力スキーマ:
+{
+  "trend": "UP" | "DOWN" | "NEUTRAL",
+  "regime": "trend" | "range",
+  "volatility": "low" | "normal" | "high" | "extreme",
+  "tradeAllowed": boolean,
+  "confidence": 0.0-1.0,
+  "reason_codes": ["コード1", "コード2"]
+}
+
+制約:
+- JSON以外のテキストを含めない
+- trend/regime/volatilityはenum値のみ
+- confidenceは0.0〜1.0の数値
+- reason_codesは英語コード（EMA_BULL, ADX_OK等）
+```
+
+**M2（セットアップ）システムプロンプト:**
+```
+あなたはFXトレードのセットアップ分析の専門家です。
+方向判定（M1）の結果を前提に、セットアップの成立を判断してください。
+
+出力スキーマ:
+{
+  "setupValid": boolean,
+  "setupType": "trendFollow" | "pullback" | "breakout" | "meanReversion",
+  "probability": 0.0-1.0,
+  "confidence": 0.0-1.0,
+  "reason_codes": [...]
+}
+
+制約:
+- probabilityとconfidenceは異なる概念
+  probability: このセットアップが成功する確率推定
+  confidence: この判断自体への自信度
+```
+
+**M3（エントリー）システムプロンプト:**
+```
+あなたはFXトレードのエントリー判断の専門家です。
+方向（M1）とセットアップ（M2）の結果を前提に、エントリーを判断してください。
+
+出力スキーマ:
+{
+  "entry": "BUY" | "SELL" | "NO_TRADE",
+  "entryType": "market" | "limit",
+  "tpPips": number,
+  "slPips": number,
+  "confidence": 0.0-1.0,
+  "reason_codes": [...]
+}
+
+制約:
+- tp/slはpips単位で出力。価格変換はサーバー側で行う
+- SLの緩和提案（slPipsを小さくする）は禁止
+- NO_TRADEの場合もconfidenceとreason_codesは必須
+```
+
+**M4（退出管理）システムプロンプト:**
+```
+あなたはFXポジション管理の専門家です。
+保有ポジションの管理アクションを提案してください。
+
+出力スキーマ:
+{
+  "action": "HOLD" | "EXIT" | "PARTIAL" | "ADJUST_TRAIL" | "EXTEND_TP",
+  "tpAdjustPips": number | null,
+  "trailMode": "ON" | "OFF" | null,
+  "confidence": 0.0-1.0,
+  "reason_codes": [...]
+}
+
+制約:
+- SL/TP/最大保有時間による強制終了には介入不可
+- exit.ai.allowedOps 外のactionは提案不可
+- SLを緩める操作は絶対禁止
+```
+
+### 4-3. 構造化コンテキスト（Layer 3）例
+
+**M1用:**
+```json
+{
+  "symbol": "USDJPY",
+  "tf": "H1",
+  "trendState": "UP",
+  "adx": 27,
+  "emaAlignment": "bullish",
+  "volatility": "normal",
+  "rangeRisk": "low",
+  "ema20": 149.50,
+  "ema50": 148.80,
+  "ema200": 145.20
+}
+```
+
+**M3用:**
+```json
+{
+  "symbol": "USDJPY",
+  "tf": "M5",
+  "trigger": "breakout",
+  "spreadOk": true,
+  "econStop": false,
+  "riskPct": 2,
+  "tpSlMode": "atr",
+  "atrPips": 12,
+  "m1Result": {"trend": "UP", "regime": "trend"},
+  "m2Result": {"setupValid": true, "setupType": "pullback"}
+}
+```
+
+---
+
+## 5. Prompt Assembler
+
+### 5-1. 責務
+
+4層プロンプトを組み立て、サニタイズしてAIProviderに渡す。
+
+```python
+class PromptAssembler:
+    """プロンプト組立 + サニタイズ"""
+
+    def assemble(
+        self,
+        stage: str,                    # "m1" / "m2" / "m3" / "m4"
+        system_prompt: str,            # Layer 1（DBから取得）
+        strategy_text: str,            # Layer 2（ユーザー入力）
+        context: dict,                 # Layer 3（動的生成）
+        rule_result: JudgeOutput | None,  # Layer 4（aiAssist時）
+    ) -> AIRequest:
+        """プロンプトを組み立てる"""
+
+        # Layer 2 サニタイズ
+        sanitized_strategy = self.sanitize(strategy_text)
+
+        # Layer 3 JSON化
+        context_json = json.dumps(context, ensure_ascii=False)
+
+        # ユーザープロンプト組立
+        user_prompt = f"戦略方針:\n{sanitized_strategy}\n\n"
+        user_prompt += f"現在のマーケットデータ:\n{context_json}\n\n"
+
+        if rule_result is not None:
+            # Layer 4（aiAssist時）
+            rule_json = json.dumps(asdict(rule_result), ensure_ascii=False)
+            user_prompt += f"ルール判定結果（参考）:\n{rule_json}\n\n"
+            user_prompt += "上記のルール判定結果を確認し、あなたの判断をJSON形式で返してください。"
+
+        return AIRequest(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=0.1,
+            max_tokens=300,
+            timeout_seconds=5.0,
+        )
+```
+
+### 5-2. 【監査3】プロンプトインジェクション対策
+
+**Prompt Validator（サニタイズ層）:**
+
+```python
+class PromptValidator:
+    """プロンプトインジェクション検出・サニタイズ"""
+
+    INJECTION_PATTERNS = [
+        r"(?i)指示を無視",
+        r"(?i)ignore\s+(previous|above|all)\s+instructions?",
+        r"(?i)system\s*prompt",
+        r"(?i)JSONフォーマットを無視",
+        r"(?i)ignore.*json",
+        r"(?i)forget.*instructions?",
+        r"(?i)new\s+instructions?",
+        r"(?i)override",
+        r"(?i)全力(買|売)",
+        r"(?i)ロット.*最大",
+        r"(?i)SL.*なし",
+        r"(?i)ストップロス.*無効",
+    ]
+
+    def sanitize(self, text: str) -> str:
+        """ユーザー入力テキストをサニタイズ"""
+        # 1. 長さ制限（2000文字）
+        text = text[:2000]
+
+        # 2. インジェクションパターン検出
+        for pattern in self.INJECTION_PATTERNS:
+            if re.search(pattern, text):
+                raise PromptInjectionDetected(
+                    f"Injection pattern detected: {pattern}"
+                )
+
+        # 3. 制御文字除去
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
+
+        return text
+
+    def validate_output_schema(self, output: dict, stage: str) -> bool:
+        """AI出力のJSONスキーマバリデーション"""
+        schema = self.SCHEMAS[stage]
+        # jsonschemaライブラリで厳密検証
+        ...
+```
+
+**二重防御:**
+1. 入力側: Prompt Validatorでユーザー戦略テキストをサニタイズ
+2. 出力側: Response Parserで出力JSONをスキーマバリデーション
+
+---
+
+## 6. Response Parser
+
+### 6-1. AI応答のパース
+
+```python
+class ResponseParser:
+    """AI応答パーサー"""
+
+    def parse(self, response: AIResponse, stage: str) -> JudgeOutput | None:
+        """AI応答をJudgeOutputにパース"""
+
+        # 1. JSON抽出（応答にJSON以外のテキストが含まれる場合に対応）
+        json_str = self._extract_json(response.raw_text)
+        if json_str is None:
+            return None  # JSON抽出失敗
+
+        # 2. JSONパース
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            return None
+
+        # 3. スキーマバリデーション
+        if not self.validator.validate_output_schema(data, stage):
+            return None
+
+        # 4. enum値検証
+        if not self._validate_enums(data, stage):
+            return None
+
+        # 5. JudgeOutput構築
+        return self._build_output(data, stage)
+
+    def _extract_json(self, text: str) -> str | None:
+        """テキストからJSON部分を抽出"""
+        # マークダウンコードブロック対応
+        match = re.search(r'```json?\s*(.*?)\s*```', text, re.DOTALL)
+        if match:
+            return match.group(1)
+        # 直接JSON
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return match.group(0)
+        return None
+```
+
+### 6-2. 各段階のバリデーションスキーマ
+
+```python
+SCHEMAS = {
+    "m1": {
+        "required": ["trend", "regime", "volatility", "tradeAllowed", "confidence"],
+        "enums": {
+            "trend": ["UP", "DOWN", "NEUTRAL"],
+            "regime": ["trend", "range"],
+            "volatility": ["low", "normal", "high", "extreme"],
+        },
+        "ranges": {"confidence": (0.0, 1.0)},
+        "types": {"tradeAllowed": bool},
+    },
+    "m2": {
+        "required": ["setupValid", "setupType", "probability", "confidence"],
+        "enums": {
+            "setupType": ["trendFollow", "pullback", "breakout", "meanReversion"],
+        },
+        "ranges": {"probability": (0.0, 1.0), "confidence": (0.0, 1.0)},
+        "types": {"setupValid": bool},
+    },
+    "m3": {
+        "required": ["entry", "entryType", "tpPips", "slPips", "confidence"],
+        "enums": {
+            "entry": ["BUY", "SELL", "NO_TRADE"],
+            "entryType": ["market", "limit"],
+        },
+        "ranges": {"confidence": (0.0, 1.0), "tpPips": (0.1, 1000), "slPips": (0.1, 1000)},
+    },
+    "m4": {
+        "required": ["action", "confidence"],
+        "enums": {
+            "action": ["HOLD", "EXIT", "PARTIAL", "ADJUST_TRAIL", "EXTEND_TP"],
+        },
+        "ranges": {"confidence": (0.0, 1.0)},
+    },
+}
+```
+
+---
+
+## 7. 【監査4】フェイルセーフ
+
+### 7-1. 異常パターンと対応
+
+```
+異常パターン              対応                   通知
+--------------------------------------------------------------
+不正JSON応答              HOLD（新規注文禁止）    ログ記録
+JSONスキーマ不適合        ruleフォールバック       ログ記録
+enum値が範囲外            ruleフォールバック       ログ記録
+APIタイムアウト           HOLD + アラート通知      メール通知
+APIエラー(429)            HOLD + 次回待機          ログ記録
+APIエラー(500/503)        HOLD + 30秒後リトライ    ログ記録
+全プロバイダ障害          トレーダー自動停止       緊急メール通知
+confidence未達            ruleフォールバック       ログ記録
+```
+
+### 7-2. フォールバックフロー
+
+```
+aiAssistモード:
+  1. ruleモード判定実行
+  2. AI呼出し
+  3. 成功 & confidence >= 閾値 → AI結果を採用
+  4. 失敗 or confidence < 閾値 → ruleの結果を採用（自動フォールバック）
+
+aiFullモード:
+  1. AI呼出し
+  2. 成功 → AI結果を採用
+  3. 失敗 → ruleモード判定を実行してフォールバック
+```
+
+### 7-3. 原則: 「判断できない時は何もしない」
+
+```
+全てのフェイルセーフにおいて:
+  - 新規注文は出さない（HOLD）
+  - 既存ポジションは維持（不正な決済を防止）
+  - SL/TP/最大保有時間による自動決済は継続（安全装置は止めない）
+```
+
+---
+
+## 8. LLMパラメータ
+
+### 8-1. 推奨設定（Excel仕様準拠）
+
+```
+temperature:   0.0〜0.2（決定論的出力を重視）
+timeout:       3〜5秒（超過はフェイルセーフ発動）
+max_tokens:    300（必要十分。過剰な出力を防止）
+```
+
+### 8-2. コスト考慮
+
+```
+入力トークン目安（1回の呼出し）:
+  Layer 1（システムプロンプト）: 約200トークン
+  Layer 2（戦略テキスト）:       最大500トークン
+  Layer 3（コンテキスト）:       約200トークン
+  Layer 4（ルール結果）:         約100トークン
+  合計入力: 約500〜1000トークン
+
+出力トークン: 最大300トークン
+
+1回の呼出しコスト（GPT-4o概算）:
+  入力: 1000 tokens × $5/1M = $0.005
+  出力: 300 tokens × $15/1M = $0.0045
+  合計: 約$0.01/回
+
+日次コスト概算（1トレーダー、aiAssistモード）:
+  M1: 24回/日（H1確定時）
+  M2: 96回/日（M15確定時、M1 PASSの半数）
+  M3: 48回/日（M5確定時、M1+M2 PASSの一部）
+  M4: 100回/日（M1確定時、ポジション保有時）
+  合計: 約268回/日 × $0.01 = 約$2.68/日
+
+→ レートリミットとコスト予算管理は14_cost_management.mdで定義
+```
+
+---
+
+## 9. AI判断ログ
+
+### 9-1. 記録内容
+
+全AI呼出しの入出力はDBに記録する（監査証跡）。
+
+```python
+@dataclass
+class AIDecisionLog:
+    """AI判断ログ"""
+    id: int
+    trader_id: int
+    user_id: int                    # テナント隔離
+    execution_id: str               # パイプライン実行ID
+    stage: str                      # "m1" / "m2" / "m3" / "m4"
+    timestamp: datetime             # UTC
+
+    # リクエスト
+    provider: str                   # "openai" / "gemini" / "claude"
+    model: str                      # "gpt-4" 等
+    system_prompt_hash: str         # システムプロンプトのハッシュ（全文保存は冗長）
+    user_prompt: str                # ユーザープロンプト全文
+    temperature: float
+    max_tokens: int
+
+    # レスポンス
+    raw_response: str               # 生の応答テキスト
+    parsed_result: dict | None      # パース済み結果（JSON）
+    parse_success: bool             # パース成功か
+    tokens_input: int
+    tokens_output: int
+    latency_ms: float
+
+    # 結果
+    adopted: bool                   # この結果が最終的に採用されたか
+    fallback_reason: str | None     # フォールバックの理由（あれば）
+```
+
+### 9-2. ログ保持ポリシー
+
+```
+全AI呼出しログ: 90日保持
+adopted=true のログ: 永久保持（判断の証跡として）
+```
+
+---
+
+## 10. 関連設計書
+
+- `04_decision_pipeline.md` - BaseJudge、オーケストレーターからの呼出し
+- `07_database_schema.md` - ai_decision_logs, system_default_prompts テーブル
+- `11_security.md` - APIキーの暗号化・管理
+- `14_cost_management.md` - レートリミット、トークン予算管理

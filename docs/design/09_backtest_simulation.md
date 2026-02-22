@@ -1,0 +1,379 @@
+# 09. バックテスト・シミュレーション設計書
+
+## 1. 概要
+
+ruleモードの決定論的パイプラインをヒストリカルデータで再実行し、
+戦略の有効性を検証するバックテスト基盤を定義する。
+
+**設計背景:**
+- ruleモードは完全に決定論的 → 再現可能なバックテストが実施可能
+- ルール主導設計により、バックテストの実用的価値が大幅に向上
+- パラメータ最適化（グリッドサーチ等）の基盤としても機能
+
+**動作モード:**
+```
+TRADING_MODE=live        → 本番取引（GmoFxExchange / BitbankExchange）
+TRADING_MODE=simulation  → ペーパートレード（本番価格 + MockExchange）
+TRADING_MODE=backtest    → バックテスト（HistoricalData + MockExchange）
+```
+
+---
+
+## 2. ヒストリカルデータソース
+
+### 2-1. FX（GMOコイン）
+
+```
+プライマリソース:
+  - GMOコイン KLine API
+  - 提供開始: 2023/10以降（約2.5年分）
+  - 対応時間足: 1min〜1month
+  - 制約: 日付単位で取得（1リクエスト=1日分）
+
+補助ソース（GMOコインデータ不足時）:
+  - HistData.com: 一部通貨ペアの無料ティックデータ
+  - Dukascopy: 高精度ティックデータ（有料）
+  - 自前蓄積: ライブデータを継続保存して長期データを構築
+```
+
+### 2-2. 暗号通貨（bitbank）
+
+```
+プライマリソース:
+  - bitbank Candlestick API
+  - 制約: 取得可能期間に制限あり
+
+補助ソース:
+  - CryptoCompare API: 長期ヒストリカルデータ
+  - 自前蓄積
+```
+
+### 2-3. データ蓄積戦略
+
+```
+日次バッチジョブ:
+  1. GMOコイン/bitbankから前日分のOHLCVを取得
+  2. historical_ohlcv テーブルに保存
+  3. データ品質チェック（欠損、異常値）
+  4. 欠損があれば補完または警告ログ
+
+初期データロード:
+  1. 取引所APIから取得可能な全期間のデータを一括取得
+  2. 補助ソースから追加データを取得
+  3. タイムゾーン正規化（UTC統一）
+  4. 品質チェック後にDB保存
+```
+
+---
+
+## 3. バックテスト実行エンジン
+
+### 3-1. アーキテクチャ
+
+```
+BacktestEngine
+  ├── SimulationClock        ... シミュレーション時計
+  ├── HistoricalDataProvider ... DB→OHLCV取得（時刻制限付き）
+  ├── BarBuilder             ... 本番と同一
+  ├── IndicatorEngine        ... 本番と同一
+  ├── StateBuilder           ... 本番と同一
+  ├── GuardEngine            ... 本番と同一
+  ├── DecisionOrchestrator   ... 本番と同一
+  ├── MockExchange           ... 仮想取引所
+  └── BacktestRecorder       ... 結果記録
+```
+
+### 3-2. SimulationClock
+
+```python
+class SimulationClock:
+    """バックテスト用シミュレーション時計"""
+
+    def __init__(self, start: datetime, end: datetime):
+        self._current = start
+        self._end = end
+
+    def now(self) -> datetime:
+        return self._current
+
+    def advance_to(self, timestamp: datetime) -> None:
+        """指定時刻まで進める"""
+        assert timestamp <= self._end
+        assert timestamp >= self._current
+        self._current = timestamp
+
+    def is_finished(self) -> bool:
+        return self._current >= self._end
+```
+
+### 3-3. 実行フロー
+
+```python
+class BacktestEngine:
+    """バックテスト実行エンジン"""
+
+    async def run(self, config: BacktestConfig) -> BacktestResult:
+        """バックテスト実行"""
+
+        clock = SimulationClock(config.start_date, config.end_date)
+        data_provider = HistoricalDataProvider(self.db, clock)
+        mock_exchange = MockExchange(
+            initial_balance=config.capital,
+            slippage_pips=config.slippage_pips,
+        )
+
+        # 本番と同一のパイプラインを構築
+        indicator_engine = IndicatorEngine(config.indicator_config)
+        state_builder = StateBuilder(config.state_config)
+        guard_engine = GuardEngine(config.safeguard_config, self.normalizer)
+        orchestrator = DecisionOrchestrator(
+            judges=self._build_judges(config),
+            guard_engine=guard_engine,
+        )
+
+        # 時系列データを1足ずつ処理
+        bars = await data_provider.get_historical_ohlcv(
+            config.pair, config.timeframe, config.start_date, config.end_date
+        )
+
+        for bar in bars:
+            # 時計を進める
+            clock.advance_to(bar.timestamp)
+
+            # 1. 指標更新
+            indicator_engine.update(bar)
+
+            # 2. 状態構築
+            state = state_builder.build(
+                pair=config.pair,
+                indicators=indicator_engine.get_snapshot(config.pair),
+            )
+
+            # 3. MockExchangeの価格更新
+            mock_exchange.set_price(config.pair, Ticker(
+                timestamp=bar.timestamp,
+                bid=bar.close, ask=bar.close, last=bar.close,
+                volume=bar.volume,
+            ))
+
+            # 4. M4退出管理（保有ポジションあれば）
+            for pos in mock_exchange.positions:
+                m4_result = await orchestrator.execute_exit_management(
+                    pos, state, config.trader_config
+                )
+                if m4_result.action != "HOLD":
+                    await self.execution_engine.execute_exit(m4_result, pos)
+
+            # 5. 新規エントリー評価
+            result = await orchestrator.execute_pipeline(
+                pair=config.pair,
+                state=state,
+                account=mock_exchange.get_account_state(),
+                positions=mock_exchange.positions,
+                trader_config=config.trader_config,
+            )
+            if result.action == "ENTRY":
+                await self.execution_engine.execute_entry(
+                    result, config.trader_config, mock_exchange.get_account_state()
+                )
+
+            # 6. 結果記録
+            recorder.record_step(clock.now(), state, result)
+
+        return recorder.finalize()
+```
+
+### 3-4. 【監査2】Look-ahead Bias防止
+
+```
+1. HistoricalDataProvider は clock.now() 以前のデータのみ返す
+   → get_ohlcv/get_historical_ohlcv に時刻上限を強制
+
+2. IndicatorEngine は確定足のみで計算
+   → 未来の足は物理的に渡されない
+
+3. StateBuilder は受け取った指標のみで状態構築
+   → タイムスタンプ検証（最新足 <= clock.now()）
+
+4. テスト（13_testing_strategy.md）で以下を検証:
+   - 時刻T時点でT以降のデータがアクセス不可であること
+   - 各ステップで「その時点で利用可能なデータのみ」が渡されること
+```
+
+---
+
+## 4. ruleモード vs aiAssistモードのバックテスト
+
+### 4-1. ruleモード
+
+```
+特徴:
+  - 完全再現可能（同一入力 → 同一出力）
+  - API呼出しなし → 高速実行
+  - パラメータ最適化に利用可能
+
+活用例:
+  - グリッドサーチ: ADX閾値(20,22,25,28,30) × ATR倍率(0.8,1.0,1.2,1.5)
+  - config_changesと組み合わせて「当時のパラメータで再実行」
+  - 戦略プリセット比較: trendFollow vs pullback vs breakout
+```
+
+### 4-2. aiAssistモード
+
+```
+AI応答は非決定的 → 完全再現は不可
+
+方式1: モック化（推奨、バックテスト基本モード）
+  - MockAIProvider で固定レスポンスを返す
+  - パイプラインの統合テストとして機能
+  - コストゼロ
+
+方式2: 記録・再生
+  - 過去のAI判断（ai_decision_logs）をリプレイ
+  - 特定のAI応答パターンの影響を分析
+  - AI変更前後の差分検証に有用
+
+方式3: 本番AI呼出し（限定使用）
+  - 実際のAI APIを呼ぶ
+  - コスト大（数百〜数千回の呼出し）
+  - 特定の検証目的でのみ使用
+```
+
+---
+
+## 5. 評価指標
+
+### 5-1. 基本指標
+
+```python
+@dataclass
+class BacktestMetrics:
+    """バックテスト評価指標"""
+
+    # 損益
+    total_pnl: float               # 総損益（JPY）
+    total_pnl_pct: float           # 総損益率（%）
+
+    # トレード統計
+    total_trades: int              # 総トレード数
+    winning_trades: int            # 勝ちトレード数
+    losing_trades: int             # 負けトレード数
+    win_rate: float                # 勝率（%）
+
+    # 収益性
+    profit_factor: float           # プロフィットファクター（総利益/総損失）
+    avg_win: float                 # 平均利益（JPY）
+    avg_loss: float                # 平均損失（JPY）
+    avg_win_pips: float            # 平均利益（pips）
+    avg_loss_pips: float           # 平均損失（pips）
+
+    # RR比
+    avg_rr_ratio: float            # 平均リスクリワード比（実現値）
+    rr_distribution: dict          # RR分布（ヒストグラム用）
+
+    # リスク
+    max_drawdown_pct: float        # 最大ドローダウン（%）
+    max_drawdown_amount: float     # 最大ドローダウン（JPY）
+    sharpe_ratio: float            # シャープレシオ（年率換算）
+    calmar_ratio: float            # カルマーレシオ（年率リターン/最大DD）
+
+    # 時間
+    avg_hold_duration_min: float   # 平均保有時間（分）
+    max_hold_duration_min: float   # 最大保有時間（分）
+
+    # セーフガード
+    guard_block_count: int         # ガードBLOCK回数
+    guard_halt_count: int          # ガードHALT回数
+    rr_block_count: int            # RRサニティチェックBLOCK回数
+    size_block_count: int          # ポジションサイズBLOCK回数
+
+    # 【生存性】破綻確率推定
+    ruin_probability: float        # 破綻確率（%）
+```
+
+### 5-2. 破綻確率推定
+
+```python
+def estimate_ruin_probability(
+    win_rate: float,           # 勝率（0.0〜1.0）
+    avg_rr: float,             # 平均RR比
+    risk_per_trade_pct: float, # 1回あたりリスク%
+    trades_per_month: int,     # 月間トレード数
+) -> float:
+    """
+    簡易的な破綻確率推定（リスクオブルーイン近似）
+
+    Kelly基準ベースの近似式:
+      edge = win_rate * avg_rr - (1 - win_rate)
+      IF edge <= 0: return 1.0（破綻確実）
+      risk_of_ruin ≈ ((1 - edge) / (1 + edge)) ^ (100 / risk_per_trade_pct)
+    """
+    edge = win_rate * avg_rr - (1 - win_rate)
+    if edge <= 0:
+        return 1.0  # 期待値マイナス → 必ず破綻
+
+    ratio = (1 - edge) / (1 + edge)
+    units = 100 / risk_per_trade_pct  # 口座を何分割しているか
+    return ratio ** units
+```
+
+---
+
+## 6. シミュレーション環境の隔離【監査2】
+
+```
+環境変数 TRADING_MODE による切替:
+
+live:
+  - positions テーブルに書込み
+  - trade_history テーブルに書込み
+  - 本番取引所API呼出し
+
+simulation:
+  - simulation_history テーブルに書込み
+  - MockExchange（メモリ内管理）
+  - 本番価格フィードを参照
+  - 本番 trade_history には触れない
+
+backtest:
+  - backtest_trades テーブルに書込み
+  - MockExchange
+  - historical_ohlcv テーブルから読取
+  - 本番テーブルには一切触れない
+```
+
+---
+
+## 7. スリッページ・約定モデリング
+
+```python
+class SlippageModel:
+    """スリッページモデル"""
+
+    def __init__(self, fixed_pips: float = 0.5, variable_pct: float = 0.0):
+        self.fixed_pips = fixed_pips
+        self.variable_pct = variable_pct
+
+    def apply(self, price: float, side: str, pair: str) -> float:
+        """スリッページ適用後の約定価格"""
+        slippage = self.fixed_pips * pip_size(pair)
+        if side == "BUY":
+            return price + slippage  # 不利な方向
+        else:
+            return price - slippage  # 不利な方向
+```
+
+設定可能パラメータ:
+- `slippage_pips`: 固定スリッページ（デフォルト: 0.5 pips）
+- `spread_pips`: 固定スプレッド（デフォルト: 0.5 pips）
+- 約定遅延: バックテストでは0ms（ステップ単位のため）
+
+---
+
+## 8. 関連設計書
+
+- `02_data_pipeline.md` - DataProvider、Indicator Engine（バックテストで再利用）
+- `04_decision_pipeline.md` - パイプライン全体（バックテストで同一コード実行）
+- `06_exchange_abstraction.md` - MockExchange
+- `07_database_schema.md` - backtest_runs, backtest_trades, historical_ohlcv
+- `13_testing_strategy.md` - Look-ahead Biasテスト

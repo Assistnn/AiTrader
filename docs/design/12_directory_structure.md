@@ -1,0 +1,216 @@
+# 12. ディレクトリ構成設計書
+
+## 1. プロジェクトルート
+
+```
+/ai_trading_system/
+  /docs/
+    /design/                        ... 設計書（16ファイル）
+    AI_Trading_System_DevSheet.xlsx ... オーナー提供仕様書
+  /backend/
+    /app/                           ... アプリケーション本体
+    /tests/                         ... テスト
+    requirements.txt
+    alembic.ini
+    /alembic/                       ... DBマイグレーション
+  /frontend/
+    /src/                           ... フロントエンド
+    package.json
+  .env.example                      ... 環境変数テンプレート
+  docker-compose.yml                ... 開発環境
+```
+
+---
+
+## 2. バックエンド構成
+
+```
+/backend/
+  /app/
+    main.py                         ... FastAPI アプリケーションエントリ
+    config.py                       ... Pydantic BaseSettings（環境モード管理含む）
+
+    /api/
+      /routes/
+        auth.py                     ... 認証
+        account.py                  ... アカウント
+        dashboard.py                ... ダッシュボード
+        traders.py                  ... トレーダーCRUD + start/stop
+        model_stages.py             ... 4段階モデル設定CRUD
+        safeguards.py               ... セーフガード設定CRUD
+        market_watch.py             ... マーケットウォッチ
+        charts.py                   ... チャートデータ
+        notifications.py            ... 通知設定
+        history.py                  ... 取引履歴
+        backtests.py                ... バックテスト実行・結果
+        pipeline_logs.py            ... パイプラインログ照会
+        config_changes.py           ... 設定変更履歴
+        settings.py                 ... システム設定
+        websocket.py                ... WebSocket
+      /middleware/
+        tenant_aware.py             ... TenantAwareSession【監査1】
+        verify_ownership.py         ... @verify_ownership【監査1】
+        auth.py                     ... JWT認証ミドルウェア
+
+    /models/                        ... SQLAlchemy モデル（20テーブル超）
+      user.py
+      trader.py
+      model_stage_config.py
+      safeguard_config.py
+      position.py
+      trade_history.py
+      pipeline_log.py
+      safeguard_log.py
+      ai_decision_log.py
+      config_change.py
+      exchange_config.py
+      ai_model_config.py
+      system_default_prompt.py
+      notification.py
+      market_watch_config.py
+      chart_config.py
+      historical_ohlcv.py
+      backtest.py
+      simulation_history.py
+      economic_event.py
+
+    /schemas/                       ... Pydantic スキーマ
+      trader.py                     ... TraderCreate/Update/Response
+      model_stage.py                ... M1-M4+MX Config schemas
+      safeguard.py                  ... SafeguardConfig schema
+      pipeline.py                   ... JudgeInput/Output/Config
+      backtest.py                   ... BacktestRequest/Result
+      common.py                     ... Pagination, ErrorResponse
+
+    /services/
+      /pipeline/                    ... データパイプライン
+        data_ingest.py              ... DataProvider統合
+        bar_builder.py              ... ティック→OHLC足
+        indicator_engine.py         ... テクニカル指標計算
+        state_builder.py            ... 数値→状態ラベル変換
+
+      /safeguard/                   ... セーフガード
+        guard_engine.py             ... GuardEngine本体
+        guard_rules.py              ... 個別ガードルール実装
+        guard_state.py              ... GuardState定義
+
+      /decision/                    ... 判定パイプライン
+        base_judge.py               ... BaseJudge ABC
+        orchestrator.py             ... DecisionOrchestrator
+        m1_direction.py             ... M1方向・レジーム判定
+        m2_setup.py                 ... M2セットアップ判定
+        m3_entry.py                 ... M3実行・エントリー
+        m4_exit.py                  ... M4退出管理
+        mx_integration.py           ... MX統合判定
+
+      /ai/                          ... AI統合
+        base_provider.py            ... BaseAIProvider ABC
+        openai_provider.py          ... OpenAI/ChatGPT
+        gemini_provider.py          ... Google Gemini
+        claude_provider.py          ... Anthropic Claude
+        mock_provider.py            ... MockAIProvider
+        prompt_assembler.py         ... プロンプト組立
+        prompt_validator.py         ... サニタイズ【監査3】
+        response_parser.py          ... AI応答パース
+
+      /exchange/                    ... 取引所
+        base.py                     ... BaseExchange ABC
+        mock.py                     ... MockExchange
+        gmo_fx.py                   ... GMOコインFX
+        bitbank.py                  ... bitbank
+        price_normalizer.py         ... 価格単位正規化
+        position_sizer.py           ... ポジションサイズ算出
+        execution_engine.py         ... 注文実行エンジン
+        rate_limiter.py             ... 注文頻度制限
+
+      /backtest/                    ... バックテスト
+        engine.py                   ... BacktestEngine
+        simulation_clock.py         ... SimulationClock
+        data_loader.py              ... ヒストリカルデータ取得
+        evaluator.py                ... 評価指標算出
+        slippage_model.py           ... スリッページモデル
+
+      /notification/                ... 通知
+        email_service.py            ... メール送信
+        daily_report.py             ... デイリーレポート
+
+      /cost/                        ... コスト管理【監査4】
+        rate_limiter.py             ... AI呼出しレートリミット
+        budget_tracker.py           ... トークン予算管理
+
+    /db/                            ... DB
+      session.py                    ... セッション管理
+      /migrations/                  ... Alembic マイグレーション
+```
+
+---
+
+## 3. テスト構成
+
+```
+/backend/tests/
+  conftest.py                       ... 共通fixture
+
+  /unit/
+    test_indicator_engine.py        ... 指標計算の精度テスト
+    test_state_builder.py           ... 状態変換の境界値テスト
+    test_guard_engine.py            ... 40ルール全テスト
+    test_decision_orchestrator.py   ... パイプライン制御フロー
+    test_m1_direction.py            ... M1判定ロジック
+    test_m2_setup.py                ... M2判定ロジック
+    test_m3_entry.py                ... M3判定ロジック
+    test_m4_exit.py                 ... M4退出ロジック
+    test_price_normalizer.py        ... pip計算・損益計算
+    test_position_sizer.py          ... ロット算出・RR検証
+    test_prompt_assembler.py        ... プロンプト合成・サニタイズ
+    test_response_parser.py         ... AI応答パース
+    test_bar_builder.py             ... 足生成
+
+  /integration/
+    test_pipeline_full.py           ... パイプライン全体+自動ログ
+    test_api_traders.py             ... トレーダーAPI
+    test_api_dashboard.py           ... ダッシュボードAPI
+    test_websocket.py               ... WebSocket
+
+  /backtest/
+    test_backtest_engine.py         ... バックテスト基本動作
+    test_look_ahead_bias.py         ... 【監査2】
+
+  /simulation/
+    test_paper_trading.py           ... ペーパートレード
+
+  /security/
+    test_tenant_isolation.py        ... 【監査1】テナント隔離
+    test_prompt_injection.py        ... 【監査3】インジェクション対策
+```
+
+---
+
+## 4. フロントエンド構成
+
+```
+/frontend/
+  /src/
+    /components/
+      /dashboard/                   ... ダッシュボード画面
+      /traders/                     ... トレーダー設定画面
+      /history/                     ... 取引履歴画面
+      /notifications/               ... 通知設定画面
+      /settings/                    ... システム設定画面
+      /backtest/                    ... バックテスト画面（新規）
+      /pipeline-logs/               ... パイプラインログ画面（新規）
+      /common/                      ... 共通コンポーネント
+    /hooks/
+      useWebSocket.ts               ... WebSocket接続
+      useApi.ts                     ... API呼出し
+    /lib/
+      api.ts                        ... APIクライアント
+      types.ts                      ... 型定義
+    /store/                         ... 状態管理
+```
+
+---
+
+## 5. 関連設計書
+
+- 各ディレクトリ内のファイルは対応する設計書で詳細定義
