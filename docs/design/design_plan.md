@@ -139,27 +139,27 @@ Config変更時に変更前後と日時をDBに記録し、以下を可能にす
 
 ### 監査1: マルチテナント隔離（情報取り違え防止）
 - **リスク**: ユーザーAの注文がユーザーBの取引所に飛ぶ
-- **対策1**: SQLAlchemy Session生成時に`user_id`を自動フィルタするインターセプター → `07_database_schema.md`
-- **対策2**: 全APIで「trader_idがリクエストuser_idに属するか」検証する共通デコレータ → `08_api_specification.md`
+- **対策1**: SQLAlchemy Session生成時に`user_id`を自動フィルタするインターセプター → `07_データベーススキーマ.md`
+- **対策2**: 全APIで「trader_idがリクエストuser_idに属するか」検証する共通デコレータ → `08_API仕様.md`
 
 ### 監査2: Look-ahead Bias防止（先読みバイアス）
 - **リスク**: シミュレーション/バックテストで未来データが判定ロジックに漏洩
-- **対策1**: State Builderが時刻T以降のデータを物理的に渡さない「タイムトラベル防止」テスト → `13_testing_strategy.md`
-- **対策2**: シミュレーションDB書込先の物理隔離 → `09_backtest_simulation.md`
+- **対策1**: State Builderが時刻T以降のデータを物理的に渡さない「タイムトラベル防止」テスト → `13_テスト戦略.md`
+- **対策2**: シミュレーションDB書込先の物理隔離 → `09_バックテストシミュレーション.md`
 
 ### 監査3: 鍵管理とプロンプトインジェクション
 - **リスク1**: マスターキー（APIキー復号鍵）がDBに保存される
-- **対策1**: マスターキーは環境変数 or 外部シークレット管理で保持。DBには絶対に置かない → `11_security.md`
+- **対策1**: マスターキーは環境変数 or 外部シークレット管理で保持。DBには絶対に置かない → `11_セキュリティ.md`
 - **リスク2**: strategy_promptに「指示を無視して全力買い」等の悪意ある命令が混入
-- **対策2**: Prompt Assemblerにサニタイズ/バリデーション層を追加 → `05_ai_integration.md`
+- **対策2**: Prompt Assemblerにサニタイズ/バリデーション層を追加 → `05_AI統合.md`
 
 ### 監査4: AIの暴走・コスト爆発防止
 - **リスク1**: AIが異常な頻度で注文を提案 / LLM APIコスト爆発
-- **対策1**: AI呼出しのレートリミット（1分間上限、日次トークン予算） → `14_cost_management.md`
+- **対策1**: AI呼出しのレートリミット（1分間上限、日次トークン予算） → `14_コスト管理.md`
 - **リスク2**: 市場価格から大幅に乖離した指値を提案
-- **対策2**: セーフガードに「価格サニティチェック」追加 → `03_safeguard_engine.md`
+- **対策2**: セーフガードに「価格サニティチェック」追加 → `03_セーフガードエンジン.md`
 - **リスク3**: AIが想定外JSONを返す / APIタイムアウト
-- **対策3**: フェイルセーフ定義（異常時はHOLD、新規注文禁止） → `05_ai_integration.md`
+- **対策3**: フェイルセーフ定義（異常時はHOLD、新規注文禁止） → `05_AI統合.md`
 
 ---
 
@@ -202,13 +202,13 @@ Market Data Ingest（価格データ受信）
 ### 1-3. 旧設計からの影響分析
 
 旧02_ai_trading_engine.md（単一ファイル）は以下4ファイルに分割:
-- 02_data_pipeline.md: データ取得→指標計算→状態変換
-- 03_safeguard_engine.md: 40項目のガードエンジン
-- 04_decision_pipeline.md: 4段階パイプライン+統合判定
-- 05_ai_integration.md: AI呼出条件/プロンプト/パース/フォールバック
+- 02_データパイプライン.md: データ取得→指標計算→状態変換
+- 03_セーフガードエンジン.md: 40項目のガードエンジン
+- 04_判断パイプライン.md: 4段階パイプライン+統合判定
+- 05_AI統合.md: AI呼出条件/プロンプト/パース/フォールバック
 
-旧06_realtime_data_flow.md は新02_data_pipeline.mdに統合（重複解消）。
-旧11_testing_strategy.md のバックテスト部分は新09_backtest_simulation.mdに独立。
+旧06_realtime_data_flow.md は新02_データパイプライン.mdに統合（重複解消）。
+旧11_testing_strategy.md のバックテスト部分は新09_バックテストシミュレーション.mdに独立。
 
 バックテストが「将来拡張」から「設計対象」に昇格した理由:
 - ruleモードは完全に決定論的 → 再現可能なバックテストが実施可能
@@ -269,29 +269,29 @@ Excel仕様により追加テーブルが必要:
 ### ファイル一覧
 
 ```
-00_executive_summary.md          ... プロジェクト概要・アーキテクチャ全体像
-01_screen_specification.md       ... 全画面仕様（Figma + Excel仕様統合）
-02_data_pipeline.md              ... データソース・取得・Bar Builder・指標計算・状態変換
-03_safeguard_engine.md           ... 40項目6カテゴリのセーフガード設計
-04_decision_pipeline.md          ... 4段階パイプライン(M1〜M4) + 統合判定(MX) + 設計思想
-05_ai_integration.md             ... AI呼出条件・プロンプト組立・パース・フォールバック
-06_exchange_abstraction.md       ... BaseExchange + PriceNormalizer + GMOコイン/bitbank固有
-07_database_schema.md            ... 全テーブル定義（20テーブル超）
-08_api_specification.md          ... REST API + WebSocket 全エンドポイント
-09_backtest_simulation.md        ... ヒストリカルデータソース・実行エンジン・評価指標
-10_frontend_architecture.md      ... コンポーネント・状態管理
-11_security.md                   ... 認証・暗号化・鍵管理・プロンプトインジェクション対策
-12_directory_structure.md        ... ディレクトリ構成
-13_testing_strategy.md           ... テスト方針・単体テスト設計
-14_cost_management.md            ... LLM APIコスト管理・レートリミット
-15_implementation_phases.md      ... 実装フェーズ計画
+00_エグゼクティブサマリー.md          ... プロジェクト概要・アーキテクチャ全体像
+01_画面仕様.md       ... 全画面仕様（Figma + Excel仕様統合）
+02_データパイプライン.md              ... データソース・取得・Bar Builder・指標計算・状態変換
+03_セーフガードエンジン.md           ... 40項目6カテゴリのセーフガード設計
+04_判断パイプライン.md          ... 4段階パイプライン(M1〜M4) + 統合判定(MX) + 設計思想
+05_AI統合.md             ... AI呼出条件・プロンプト組立・パース・フォールバック
+06_取引所抽象化.md       ... BaseExchange + PriceNormalizer + GMOコイン/bitbank固有
+07_データベーススキーマ.md            ... 全テーブル定義（20テーブル超）
+08_API仕様.md          ... REST API + WebSocket 全エンドポイント
+09_バックテストシミュレーション.md        ... ヒストリカルデータソース・実行エンジン・評価指標
+10_フロントエンドアーキテクチャ.md      ... コンポーネント・状態管理
+11_セキュリティ.md                   ... 認証・暗号化・鍵管理・プロンプトインジェクション対策
+12_ディレクトリ構成.md        ... ディレクトリ構成
+13_テスト戦略.md           ... テスト方針・単体テスト設計
+14_コスト管理.md            ... LLM APIコスト管理・レートリミット
+15_実装フェーズ.md      ... 実装フェーズ計画
 ```
 
 ### 作成順序（依存関係順）
 
 **Step 1（最重要・データの土台）**
 ```
-02_data_pipeline.md
+02_データパイプライン.md
   GMOコイン API / bitbank APIのデータソース仕様から、
   Bar Builder、Indicator Engine、State Builderまでの
   全パイプラインを定義。後続の全設計書の入力データを規定する。
@@ -299,45 +299,45 @@ Excel仕様により追加テーブルが必要:
 
 **Step 2（判定ロジック）**
 ```
-03_safeguard_engine.md    ... 判定に先立つ安全チェック（40項目）
-04_decision_pipeline.md   ... 4段階パイプライン + BaseJudgeインターフェース
+03_セーフガードエンジン.md    ... 判定に先立つ安全チェック（40項目）
+04_判断パイプライン.md   ... 4段階パイプライン + BaseJudgeインターフェース
                               + オーケストレーター自動ログ設計
 ```
 
 **Step 3（AI・外部接続）**
 ```
-05_ai_integration.md      ... 判定パイプラインのAIプラグイン
-06_exchange_abstraction.md ... 執行レイヤー（GMOコイン/bitbank/Mock）
+05_AI統合.md      ... 判定パイプラインのAIプラグイン
+06_取引所抽象化.md ... 執行レイヤー（GMOコイン/bitbank/Mock）
 ```
 
 **Step 4（永続化・API）**
 ```
-07_database_schema.md     ... Step1-3 + pipeline_logs + config_changes
-08_api_specification.md   ... DBスキーマ確定後にエンドポイント設計
+07_データベーススキーマ.md     ... Step1-3 + pipeline_logs + config_changes
+08_API仕様.md   ... DBスキーマ確定後にエンドポイント設計
 ```
 
 **Step 5（検証基盤）**
 ```
-09_backtest_simulation.md ... パイプライン設計確定後にバックテスト設計
-13_testing_strategy.md    ... バックテスト設計と連携したテスト方針
+09_バックテストシミュレーション.md ... パイプライン設計確定後にバックテスト設計
+13_テスト戦略.md    ... バックテスト設計と連携したテスト方針
 ```
 
 **Step 6（残り）**
 ```
-00_executive_summary.md        ... 全体像は最後にまとめる
-01_screen_specification.md     ... オーナーからのUI方針回答後
-10_frontend_architecture.md    ... 画面仕様確定後
-11_security.md                 ... 監査指摘対応の集約
-12_directory_structure.md      ... 全サービス確定後
-14_cost_management.md          ... AI統合設計確定後
-15_implementation_phases.md    ... 全設計書完成後
+00_エグゼクティブサマリー.md        ... 全体像は最後にまとめる
+01_画面仕様.md     ... オーナーからのUI方針回答後
+10_フロントエンドアーキテクチャ.md    ... 画面仕様確定後
+11_セキュリティ.md                 ... 監査指摘対応の集約
+12_ディレクトリ構成.md      ... 全サービス確定後
+14_コスト管理.md          ... AI統合設計確定後
+15_実装フェーズ.md    ... 全設計書完成後
 ```
 
 ---
 
 ## 4. 各設計書の内容概要
 
-### 02_data_pipeline.md（最優先）
+### 02_データパイプライン.md（最優先）
 
 **ライブデータソース:**
 
@@ -404,7 +404,7 @@ class BaseDataProvider(ABC):
 - タイムゾーン正規化: UTC統一
 - 補完ルール: 前値補完 or 線形補間（指標種別ごとに定義）
 
-### 03_safeguard_engine.md
+### 03_セーフガードエンジン.md
 
 **40項目・6カテゴリ（Excel仕様SG-001〜SG-040に準拠）:**
 
@@ -455,7 +455,7 @@ class BaseDataProvider(ABC):
 - HALT: トレーダー自体を停止
 - 全評価結果をログに記録（監査証跡）
 
-### 04_decision_pipeline.md
+### 04_判断パイプライン.md
 
 **設計思想の適用:**
 
@@ -541,7 +541,7 @@ M4: 退出管理（9設定項目）
 - 各段階の実行間隔はトレーダー設定で制御
 - イベント駆動: 足確定 or ポジション変化をトリガーに評価
 
-### 05_ai_integration.md
+### 05_AI統合.md
 
 **AI呼出条件（aiAssist/aiFullモード時のみ）:**
 - ruleモードでは一切AIを呼ばない
@@ -586,7 +586,7 @@ Exit:      {"action":"EXTEND_TP","tpAdjustPips":5,"trailMode":"ON",
 - 検出パターン: 「指示を無視」「system promptを変更」「JSONフォーマットを無視」等
 - 出力パース時にJSONスキーマバリデーションを厳密実施
 
-### 06_exchange_abstraction.md
+### 06_取引所抽象化.md
 
 ```python
 class BaseExchange(ABC):
@@ -620,7 +620,7 @@ class BaseExchange(ABC):
 **bitbank実装（BitbankExchange）:**
 - bitbank API (REST + WebSocket) をBaseExchangeインターフェースに適合
 
-### 07_database_schema.md
+### 07_データベーススキーマ.md
 
 **【監査1対応】マルチテナント隔離:**
 - 全テーブルに`user_id`カラム必須化 + インデックス設計
@@ -668,7 +668,7 @@ UI永続化テーブル:
   - changed_at, changed_by (user_id), change_reason (任意コメント)
   - 用途: 「先週のパラメータに戻す」「変更前後の成績比較」
 
-### 08_api_specification.md
+### 08_API仕様.md
 
 **【監査1対応】全エンドポイントのオーナーシップ検証:**
 - `trader_id`を受け取る全APIに共通デコレータ`@verify_ownership`を適用
@@ -689,7 +689,7 @@ UI永続化テーブル:
 - Account: 情報取得/更新, ログアウト
 - WebSocket: prices, trader_updates, alerts, pipeline_status（新規）
 
-### 09_backtest_simulation.md（新規）
+### 09_バックテストシミュレーション.md（新規）
 
 **ヒストリカルデータソース:**
 
@@ -756,7 +756,7 @@ aiAssistモード:
 - シミュレーション時: `simulation_history`テーブルに書込
 - 本番`trade_history`テーブルには触れない
 
-### 11_security.md
+### 11_セキュリティ.md
 
 **マスターキー管理:**【監査3】
 - APIキー暗号化のマスターキーはDBに絶対に保存しない
@@ -764,10 +764,10 @@ aiAssistモード:
 - ログ出力時にAPIキーがマスクされる事を保証
 
 **プロンプトインジェクション対策:**【監査3】
-- 05_ai_integration.md のPrompt Assemblerで対策
+- 05_AI統合.md のPrompt Assemblerで対策
 - 二重防御: 出力パース時にJSONスキーマバリデーション
 
-### 12_directory_structure.md
+### 12_ディレクトリ構成.md
 
 ```
 /ai_trading_system/
@@ -828,7 +828,7 @@ aiAssistモード:
       test_paper_trading.py
 ```
 
-### 13_testing_strategy.md
+### 13_テスト戦略.md
 
 **テストの特殊性（改定）**:
 ルール主導になったことで、決定論的処理のテストカバレッジを最大化できる。
@@ -881,7 +881,7 @@ ruleモードのパイプライン全体を厳密にテストする。
 - config_changesにパラメータ変更が記録される事を検証
 ```
 
-### 14_cost_management.md【監査4】
+### 14_コスト管理.md【監査4】
 
 **LLM APIコスト管理:**
 - トレーダーごと・段階ごとのAI呼出し回数/トークン消費量を記録
