@@ -1,35 +1,56 @@
 """
 @verify_ownership decorator for API routes.
 
-Reference: 07_データベーススキーマ Section 2【監査1】
+Reference: 08_API仕様 Section 2-2【監査1】
 
-Ensures that a user can only access their own resources.
+Ensures that a user can only access their own resources (traders, etc.).
 Applied to all API endpoints that handle tenant-specific data.
+
+Usage:
+    @router.get("/traders/{trader_id}")
+    async def get_trader(
+        trader_id: int,
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ):
+        await verify_trader_ownership(trader_id, user.id, db)
+        ...
 """
 
-from functools import wraps
-from typing import Any, Callable
+from __future__ import annotations
 
 from fastapi import HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.trader import Trader
 
 
-def verify_ownership(model_class: Any):
+async def verify_trader_ownership(
+    trader_id: int, user_id: int, db: AsyncSession,
+) -> Trader:
     """
-    Decorator factory that verifies the authenticated user owns the requested resource.
+    Verify that the trader belongs to the authenticated user.
 
-    Usage:
-        @router.get("/{trader_id}")
-        @verify_ownership(Trader)
-        async def get_trader(trader_id: int, db: TenantAwareSession = Depends(...)):
-            ...
+    Returns the Trader object if ownership is confirmed.
+    Raises 403 Forbidden if trader does not belong to user.
+    Raises 404 Not Found if trader does not exist.
     """
+    result = await db.execute(
+        select(Trader).where(Trader.id == trader_id)
+    )
+    trader = result.scalar_one_or_none()
 
-    def decorator(func: Callable):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            return await func(*args, **kwargs)
+    if trader is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trader not found",
+        )
 
-        wrapper._verify_ownership_model = model_class
-        return wrapper
+    if trader.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden",
+        )
 
-    return decorator
+    return trader

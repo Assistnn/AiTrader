@@ -31,10 +31,11 @@ class Settings(BaseSettings):
     # --- Database ---
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/ai_trading"
 
-    # --- Security (11_セキュリティ.md Section 7) ---
+    # --- Security (11_セキュリティ.md Section 2-1, 7) ---
     JWT_SECRET_KEY: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_MINUTES: int = 1440  # 24 hours
+    JWT_ACCESS_EXPIRE_MINUTES: int = 60  # 1 hour per design
+    JWT_REFRESH_EXPIRE_DAYS: int = 7  # 7 days per design
     MASTER_ENCRYPTION_KEY: str = "change-me-in-production"
 
     # --- CORS ---

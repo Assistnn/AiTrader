@@ -7,12 +7,14 @@ from datetime import datetime, timezone
 
 from app.services.pipeline.data_types import OHLCV
 from app.services.pipeline.indicator_engine import (
+    ADXState,
     ATRState,
     BollingerState,
     DonchianState,
     EMAState,
     IndicatorEngine,
     RSIState,
+    SwingState,
 )
 
 
@@ -164,3 +166,93 @@ class TestIndicatorEngine:
     def test_nonexistent_snapshot_returns_none(self):
         engine = IndicatorEngine()
         assert engine.get_snapshot("XYZ", "H1") is None
+
+    def test_get_all_snapshots(self):
+        """Cover line 403: get_all_snapshots for a pair with multiple timeframes."""
+        from datetime import timedelta
+        engine = IndicatorEngine()
+        pair = "USD_JPY"
+        base_ts = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        bar = OHLCV(
+            timestamp=base_ts, open=100.0, high=100.5, low=99.5, close=100.0, volume=1000.0,
+        )
+        engine.update(pair, "H1", bar)
+        engine.update(pair, "M5", bar)
+        result = engine.get_all_snapshots(pair)
+        assert "H1" in result
+        assert "M5" in result
+        assert len(result) == 2
+
+    def test_get_all_snapshots_empty(self):
+        """Cover line 403: get_all_snapshots for unknown pair → empty dict."""
+        engine = IndicatorEngine()
+        result = engine.get_all_snapshots("UNKNOWN_PAIR")
+        assert result == {}
+
+
+class TestADXZeroTR:
+    def test_adx_zero_smoothed_tr(self):
+        """Cover line 106: ADXState returns result when smoothed_tr == 0."""
+        adx = ADXState(period=3)
+        # All bars identical → TR=0, smoothed_tr=0
+        for _ in range(5):
+            bar = OHLCV(
+                timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                open=100.0, high=100.0, low=100.0, close=100.0, volume=0.0,
+            )
+            result = adx.update(bar)
+        # After period+1 bars with zero TR, smoothed_tr=0 → early return
+        assert isinstance(result, dict)
+
+
+class TestSwingState:
+    def test_swing_high_detected(self):
+        """Cover line 294: swing high when center bar is highest."""
+        swing = SwingState(lookback=5)
+        # bars: high = [100, 101, 105, 101, 100]
+        bars = [
+            OHLCV(timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                   open=99.0, high=100.0, low=98.0, close=99.0, volume=100.0),
+            OHLCV(timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                   open=100.0, high=101.0, low=99.0, close=100.0, volume=100.0),
+            OHLCV(timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                   open=104.0, high=105.0, low=103.0, close=104.0, volume=100.0),
+            OHLCV(timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                   open=100.0, high=101.0, low=99.0, close=100.0, volume=100.0),
+            OHLCV(timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                   open=99.0, high=100.0, low=98.0, close=99.0, volume=100.0),
+        ]
+        for bar in bars:
+            result = swing.update(bar)
+        assert result["swing_high"] == 105.0
+
+    def test_swing_low_detected(self):
+        """Cover line 298: swing low when center bar is lowest."""
+        swing = SwingState(lookback=5)
+        # bars: low = [100, 99, 95, 99, 100]
+        bars = [
+            OHLCV(timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                   open=101.0, high=102.0, low=100.0, close=101.0, volume=100.0),
+            OHLCV(timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                   open=100.0, high=101.0, low=99.0, close=100.0, volume=100.0),
+            OHLCV(timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                   open=96.0, high=97.0, low=95.0, close=96.0, volume=100.0),
+            OHLCV(timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                   open=100.0, high=101.0, low=99.0, close=100.0, volume=100.0),
+            OHLCV(timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                   open=101.0, high=102.0, low=100.0, close=101.0, volume=100.0),
+        ]
+        for bar in bars:
+            result = swing.update(bar)
+        assert result["swing_low"] == 95.0
+
+    def test_no_swing_when_not_enough_bars(self):
+        """SwingState returns None for highs/lows before lookback bars."""
+        swing = SwingState(lookback=5)
+        bar = OHLCV(
+            timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            open=100.0, high=101.0, low=99.0, close=100.0, volume=100.0,
+        )
+        result = swing.update(bar)
+        assert result["swing_high"] is None
+        assert result["swing_low"] is None
