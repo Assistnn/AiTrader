@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.services.backtest.simulation_clock import SimulationClock
 
 from app.services.pipeline.data_types import OHLCV, Ticker
 from app.services.exchange.base_exchange import BaseExchange
@@ -28,22 +32,33 @@ class MockExchange(BaseExchange):
     Reference: Section 7
     """
 
-    def __init__(self, initial_balance: float = 1_000_000.0):
+    def __init__(
+        self,
+        initial_balance: float = 1_000_000.0,
+        clock: SimulationClock | None = None,
+    ):
         self.balance_total = initial_balance
         self.balance_available = initial_balance
         self.positions: list[ExchangePosition] = []
         self.orders: list[Order] = []
         self.current_prices: dict[str, Ticker] = {}
         self.trade_history: list[dict] = []
+        self._clock = clock
 
         # Simulation settings
         self.slippage_pips: float = 0.0
         self.spread_pips: float = 0.5
 
+    def _get_now(self) -> datetime:
+        """現在時刻を返す. clock設定時はシミュレーション時刻を使用."""
+        if self._clock is not None:
+            return self._clock.now()
+        return datetime.now(timezone.utc)
+
     def set_price(self, pair: str, bid: float, ask: float) -> None:
         """Set current price for simulation."""
         self.current_prices[pair] = Ticker(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=self._get_now(),
             bid=bid, ask=ask,
             last=(bid + ask) / 2,
             volume=0.0,
@@ -54,7 +69,7 @@ class MockExchange(BaseExchange):
             return self.current_prices[pair]
         # Default price
         return Ticker(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=self._get_now(),
             bid=100.0, ask=100.02, last=100.01, volume=0.0,
         )
 
@@ -73,7 +88,7 @@ class MockExchange(BaseExchange):
         sl_price: float | None = None,
     ) -> Order:
         """Place a virtual order (immediate fill for MARKET). Reference: Section 7-2"""
-        now = datetime.now(timezone.utc)
+        now = self._get_now()
         order_id = str(uuid.uuid4())
         coid = client_order_id or str(uuid.uuid4())
 
@@ -133,7 +148,7 @@ class MockExchange(BaseExchange):
         for order in self.orders:
             if order.order_id == order_id and order.status == OrderStatus.PENDING:
                 order.status = OrderStatus.CANCELLED
-                order.updated_at = datetime.now(timezone.utc)
+                order.updated_at = self._get_now()
                 return True
         return False
 
@@ -150,7 +165,7 @@ class MockExchange(BaseExchange):
         self, position_id: str, amount: float | None = None,
     ) -> Order:
         """Close position (partial when amount specified). Reference: Section 7-2"""
-        now = datetime.now(timezone.utc)
+        now = self._get_now()
 
         pos = None
         for p in self.positions:
@@ -211,7 +226,7 @@ class MockExchange(BaseExchange):
             if order.order_id == order_id and order.status == OrderStatus.PENDING:
                 if price is not None:
                     order.price = price
-                order.updated_at = datetime.now(timezone.utc)
+                order.updated_at = self._get_now()
                 return order
         raise ValueError(f"Order not found or not modifiable: {order_id}")
 
