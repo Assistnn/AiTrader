@@ -21,9 +21,15 @@ class OrderRateLimiter:
     - Cancel+re-place: 3 seconds
     """
 
-    def __init__(self, min_interval_sec: float = 2.0, max_per_minute: int = 10):
+    def __init__(
+        self,
+        min_interval_sec: float = 2.0,
+        max_per_minute: int = 10,
+        max_per_second: int = 0,
+    ):
         self.min_interval = min_interval_sec
         self.max_per_minute = max_per_minute
+        self.max_per_second = max_per_second  # 0 = unlimited (default for FX)
         self.recent_orders: list[datetime] = []
         self.last_order_time: datetime | None = None
 
@@ -48,6 +54,18 @@ class OrderRateLimiter:
                 await asyncio.sleep(wait)
                 total_wait += wait
                 now = datetime.now(timezone.utc)
+
+        # Per-second rate check (bitbank: 6/sec)
+        if self.max_per_second > 0:
+            one_sec_ago = now - timedelta(seconds=1)
+            recent_sec = [t for t in self.recent_orders if t > one_sec_ago]
+            if len(recent_sec) >= self.max_per_second:
+                wait_until = recent_sec[0] + timedelta(seconds=1)
+                wait = (wait_until - now).total_seconds()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                    total_wait += wait
+                    now = datetime.now(timezone.utc)
 
         # Per-minute rate check
         one_min_ago = now - timedelta(minutes=1)
@@ -77,6 +95,13 @@ class OrderRateLimiter:
             if last.tzinfo is None:
                 last = last.replace(tzinfo=timezone.utc)
             if (now - last).total_seconds() < self.min_interval:
+                return False
+
+        # Per-second check
+        if self.max_per_second > 0:
+            one_sec_ago = now - timedelta(seconds=1)
+            recent_sec = [t for t in self.recent_orders if t > one_sec_ago]
+            if len(recent_sec) >= self.max_per_second:
                 return False
 
         one_min_ago = now - timedelta(minutes=1)

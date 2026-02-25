@@ -86,6 +86,140 @@ class TestPriceNormalizer:
 
 
 # ===========================================================================
+# PriceNormalizer — Crypto (Phase 4 Step 1)
+# ===========================================================================
+
+
+class TestPriceNormalizerCrypto:
+    """Crypto pair tests proving existing PIP_DEFINITIONS work for BTC/XRP."""
+
+    def test_to_pips_btc_jpy(self):
+        n = PriceNormalizer()
+        # BTC: pip_size=1, so 50000 JPY diff = 50000 pips
+        assert n.to_pips(50000, "BTC_JPY") == 50000.0
+
+    def test_to_pips_xrp_jpy(self):
+        n = PriceNormalizer()
+        # XRP: pip_size=0.001, so 0.5 JPY diff = 500 pips
+        assert n.to_pips(0.5, "XRP_JPY") == 500.0
+
+    def test_from_pips_btc_jpy(self):
+        n = PriceNormalizer()
+        # 50000 pips * pip_size(1) = 50000
+        assert n.from_pips(50000.0, "BTC_JPY") == 50000.0
+
+    def test_from_pips_xrp_jpy(self):
+        n = PriceNormalizer()
+        # 500 pips * pip_size(0.001) = 0.5
+        assert abs(n.from_pips(500.0, "XRP_JPY") - 0.5) < 1e-8
+
+    def test_pip_value_btc_jpy(self):
+        n = PriceNormalizer()
+        # pip_value_per_lot=1, lot=0.1 → 0.1
+        assert n.pip_value("BTC_JPY", 0.1) == pytest.approx(0.1)
+        assert n.pip_value("BTC_JPY", 1.0) == 1.0
+
+    def test_pip_value_xrp_jpy(self):
+        n = PriceNormalizer()
+        # pip_value_per_lot=1000, lot=1.0 → 1000
+        assert n.pip_value("XRP_JPY", 1.0) == 1000.0
+        assert n.pip_value("XRP_JPY", 10.0) == 10000.0
+
+    def test_round_price_btc_jpy(self):
+        n = PriceNormalizer()
+        # pip_digits=0, round to integer
+        assert n.round_price(15000000.7, "BTC_JPY") == 15000001.0
+        assert n.round_price(15000000.3, "BTC_JPY") == 15000000.0
+
+    def test_round_price_xrp_jpy(self):
+        n = PriceNormalizer()
+        # pip_digits=3
+        assert n.round_price(80.1234, "XRP_JPY") == 80.123
+        assert n.round_price(80.1235, "XRP_JPY") == 80.124
+
+    def test_calculate_pnl_btc_jpy(self):
+        n = PriceNormalizer()
+        # Buy BTC at 15,000,000, sell at 15,050,000, 0.1 lot
+        # diff=50000, pips=50000, pip_value=0.1, pnl=5000
+        pnl = n.calculate_pnl(15_000_000, 15_050_000, "BUY", 0.1, "BTC_JPY")
+        assert abs(pnl - 5000.0) < 0.01
+
+    def test_calculate_pnl_xrp_jpy(self):
+        n = PriceNormalizer()
+        # Buy XRP at 80.000, sell at 80.100, 1 lot
+        # diff=0.1, pips=100, pip_value=1000, pnl=100000
+        pnl = n.calculate_pnl(80.000, 80.100, "BUY", 1.0, "XRP_JPY")
+        assert abs(pnl - 100000.0) < 0.01
+
+    def test_get_pip_definition_btc(self):
+        n = PriceNormalizer()
+        defn = n.get_pip_definition("BTC_JPY")
+        assert defn["pip_size"] == 1
+        assert defn["pip_digits"] == 0
+        assert defn["pip_value_per_lot"] == 1
+
+    def test_get_pip_definition_eth(self):
+        n = PriceNormalizer()
+        defn = n.get_pip_definition("ETH_JPY")
+        assert defn["pip_size"] == 1
+        assert defn["pip_digits"] == 0
+
+
+# ===========================================================================
+# PositionSizer — Crypto (Phase 4 Step 2)
+# ===========================================================================
+
+
+class TestPositionSizerCrypto:
+    """Crypto position sizing tests."""
+
+    def test_btc_sizing(self):
+        n = PriceNormalizer()
+        sizer = PositionSizer(n)
+        result = sizer.calculate(
+            pair="BTC_JPY", capital=1_000_000,
+            risk_per_trade_pct=2.0, sl_pips=100_000, tp_pips=200_000,
+            min_lot=0.001, max_lot=10.0,
+        )
+        # risk=20000, pip_value_per_lot=1, raw=20000/(100000*1)=0.2
+        assert abs(result.lot_size - 0.2) < 0.001
+        assert abs(result.rr_ratio - 2.0) < 0.01
+
+    def test_xrp_sizing_clips_to_min(self):
+        n = PriceNormalizer()
+        sizer = PositionSizer(n)
+        result = sizer.calculate(
+            pair="XRP_JPY", capital=500_000,
+            risk_per_trade_pct=1.0, sl_pips=1000, tp_pips=2000,
+            min_lot=1.0, max_lot=1000.0,
+        )
+        # risk=5000, pip_value_per_lot=1000, raw=5000/(1000*1000)=0.005 → min=1.0
+        assert result.lot_size == 1.0
+
+    def test_btc_clips_to_max(self):
+        n = PriceNormalizer()
+        sizer = PositionSizer(n)
+        result = sizer.calculate(
+            pair="BTC_JPY", capital=100_000_000,
+            risk_per_trade_pct=5.0, sl_pips=10000, tp_pips=20000,
+            min_lot=0.001, max_lot=5.0,
+        )
+        # risk=5000000, raw=5000000/(10000*1)=500 → max=5.0
+        assert result.lot_size == 5.0
+
+    def test_xrp_rr_ratio(self):
+        n = PriceNormalizer()
+        sizer = PositionSizer(n)
+        result = sizer.calculate(
+            pair="XRP_JPY", capital=1_000_000,
+            risk_per_trade_pct=2.0, sl_pips=500, tp_pips=750,
+            min_lot=1.0, max_lot=1000.0,
+        )
+        assert abs(result.rr_ratio - 1.5) < 0.01
+        assert "capital" in result._debug
+
+
+# ===========================================================================
 # PositionSizer
 # ===========================================================================
 
@@ -229,6 +363,42 @@ class TestMockExchange:
 
 
 # ===========================================================================
+# MockExchange — Crypto Slippage (Phase 4 Step 3)
+# ===========================================================================
+
+
+class TestMockExchangeCryptoSlippage:
+    """Verify PriceNormalizer-based slippage works for Crypto pairs."""
+
+    @pytest.mark.asyncio
+    async def test_btc_jpy_slippage(self):
+        ex = MockExchange()
+        ex.slippage_pips = 5.0  # 5 pips for BTC (pip_size=1 → 5 JPY)
+        ex.set_price("BTC_JPY", bid=15_000_000, ask=15_000_100)
+        order = await ex.place_order("BTC_JPY", OrderSide.BUY, 0.1, OrderType.MARKET)
+        # ask=15000100 + slip(5*1)=5 → 15000105
+        assert order.filled_price == pytest.approx(15_000_105.0, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_xrp_jpy_slippage(self):
+        ex = MockExchange()
+        ex.slippage_pips = 10.0  # 10 pips for XRP (pip_size=0.001 → 0.01 JPY)
+        ex.set_price("XRP_JPY", bid=80.000, ask=80.002)
+        order = await ex.place_order("XRP_JPY", OrderSide.BUY, 1.0, OrderType.MARKET)
+        # ask=80.002 + slip(10*0.001)=0.01 → 80.012
+        assert order.filled_price == pytest.approx(80.012, abs=0.0001)
+
+    @pytest.mark.asyncio
+    async def test_eur_usd_slippage(self):
+        ex = MockExchange()
+        ex.slippage_pips = 3.0  # 3 pips for EUR_USD (pip_size=0.0001 → 0.0003)
+        ex.set_price("EUR_USD", bid=1.0800, ask=1.0802)
+        order = await ex.place_order("EUR_USD", OrderSide.SELL, 1.0, OrderType.MARKET)
+        # bid=1.0800 - slip(3*0.0001)=0.0003 → 1.0797
+        assert order.filled_price == pytest.approx(1.0797, abs=0.00001)
+
+
+# ===========================================================================
 # OrderRateLimiter
 # ===========================================================================
 
@@ -248,3 +418,37 @@ class TestOrderRateLimiter:
         for _ in range(3):
             limiter.record_order()
         assert limiter.can_order_now() is False
+
+
+# ===========================================================================
+# OrderRateLimiter — Per-second (Phase 4 Step 4, bitbank)
+# ===========================================================================
+
+
+class TestOrderRateLimiterPerSecond:
+    """Per-second rate limiting for bitbank (6 orders/sec)."""
+
+    def test_bitbank_config(self):
+        limiter = OrderRateLimiter(
+            min_interval_sec=0.0, max_per_minute=60, max_per_second=6,
+        )
+        assert limiter.max_per_second == 6
+        assert limiter.can_order_now() is True
+
+    def test_per_second_exceeded(self):
+        limiter = OrderRateLimiter(
+            min_interval_sec=0.0, max_per_minute=100, max_per_second=3,
+        )
+        for _ in range(3):
+            limiter.record_order()
+        # Per-second limit reached (3/3), but per-minute still OK
+        assert limiter.can_order_now() is False
+
+    def test_default_unlimited_per_second(self):
+        """Default max_per_second=0 means no per-second limit (FX compat)."""
+        limiter = OrderRateLimiter(min_interval_sec=0.0, max_per_minute=100)
+        assert limiter.max_per_second == 0
+        # No per-second limit, so 10 rapid orders are fine (within per-minute)
+        for _ in range(10):
+            limiter.record_order()
+        assert limiter.can_order_now() is True  # still under 100/min

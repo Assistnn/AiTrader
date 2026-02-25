@@ -23,6 +23,7 @@ from app.services.exchange.exchange_types import (
     OrderStatus,
     OrderType,
 )
+from app.services.exchange.price_normalizer import PriceNormalizer
 
 
 class MockExchange(BaseExchange):
@@ -36,6 +37,7 @@ class MockExchange(BaseExchange):
         self,
         initial_balance: float = 1_000_000.0,
         clock: SimulationClock | None = None,
+        price_normalizer: PriceNormalizer | None = None,
     ):
         self.balance_total = initial_balance
         self.balance_available = initial_balance
@@ -44,6 +46,7 @@ class MockExchange(BaseExchange):
         self.current_prices: dict[str, Ticker] = {}
         self.trade_history: list[dict] = []
         self._clock = clock
+        self._normalizer = price_normalizer or PriceNormalizer()
 
         # Simulation settings
         self.slippage_pips: float = 0.0
@@ -231,11 +234,10 @@ class MockExchange(BaseExchange):
         raise ValueError(f"Order not found or not modifiable: {order_id}")
 
     def _apply_slippage(self, base_price: float, side: OrderSide, pair: str) -> float:
-        """Apply slippage to price."""
+        """Apply slippage to price using PriceNormalizer (FX/Crypto agnostic)."""
         if self.slippage_pips == 0:
             return base_price
-        # Approximate: 0.01 per pip for JPY pairs
-        slip = self.slippage_pips * 0.01
+        slip = self._normalizer.from_pips(self.slippage_pips, pair)
         if side == OrderSide.BUY:
             return base_price + slip  # worse for buyer
         return base_price - slip  # worse for seller
