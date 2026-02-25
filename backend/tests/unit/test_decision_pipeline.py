@@ -3,6 +3,7 @@ Decision Pipeline tests.
 Reference: 04_判定パイプライン, 13_テスト戦略
 """
 
+import pytest
 from datetime import datetime, timedelta, timezone
 
 from app.services.decision.base_judge import BaseJudge
@@ -78,50 +79,56 @@ def _judge_input(state=None, guard_state=None, **kwargs) -> JudgeInput:
 
 
 class TestM1DirectionJudge:
-    def test_uptrend_detected(self):
+    @pytest.mark.asyncio
+    async def test_uptrend_detected(self):
         judge = M1DirectionJudge()
         config = JudgeConfig(timeframes=["H1"], params={"useTrendDirection": True})
         input = _judge_input(state=_state(ema20=150.0, ema50=149.0, ema200=145.0, adx14=30.0))
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["trend"] == "UP"
         assert output.result["tradeAllowed"] is True
 
-    def test_downtrend_detected(self):
+    @pytest.mark.asyncio
+    async def test_downtrend_detected(self):
         judge = M1DirectionJudge()
         config = JudgeConfig(timeframes=["H1"])
         input = _judge_input(state=_state(ema20=145.0, ema50=148.0, ema200=150.0, adx14=30.0))
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["trend"] == "DOWN"
 
-    def test_neutral_low_adx(self):
+    @pytest.mark.asyncio
+    async def test_neutral_low_adx(self):
         judge = M1DirectionJudge()
         config = JudgeConfig(timeframes=["H1"])
         input = _judge_input(state=_state(adx14=15.0))
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["trend"] == "NEUTRAL"
         assert output.result["regime"] == "range"
 
-    def test_range_avoid_blocks_trade(self):
+    @pytest.mark.asyncio
+    async def test_range_avoid_blocks_trade(self):
         judge = M1DirectionJudge()
         config = JudgeConfig(timeframes=["H1"], params={"useRangeAvoid": True})
         input = _judge_input(state=_state(adx14=15.0))
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["tradeAllowed"] is False
         assert "RANGE_AVOID" in output.reason_codes
 
-    def test_extreme_volatility_blocks_trade(self):
+    @pytest.mark.asyncio
+    async def test_extreme_volatility_blocks_trade(self):
         judge = M1DirectionJudge()
         config = JudgeConfig(timeframes=["H1"], params={"useVolatility": True})
         input = _judge_input(state=_state(volatility="extreme"))
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["tradeAllowed"] is False
         assert "EXTREME_VOLATILITY" in output.reason_codes
 
-    def test_debug_fields_present(self):
+    @pytest.mark.asyncio
+    async def test_debug_fields_present(self):
         judge = M1DirectionJudge()
         config = JudgeConfig(timeframes=["H1"])
         input = _judge_input()
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert "ema20" in output._debug
         assert "adx14" in output._debug
 
@@ -132,42 +139,46 @@ class TestM1DirectionJudge:
 
 
 class TestM2SetupJudge:
-    def test_trend_follow_valid(self):
+    @pytest.mark.asyncio
+    async def test_trend_follow_valid(self):
         judge = M2SetupJudge()
         config = JudgeConfig(timeframes=["M15"], params={"preset": "trendFollow"})
         m1_output = JudgeOutput(result={"trend": "UP", "tradeAllowed": True}, confidence=0.8)
         input = _judge_input(previous_stages={"m1": m1_output})
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["setupValid"] is True
         assert output.result["setupType"] == "trendFollow"
 
-    def test_trend_follow_invalid_no_trend(self):
+    @pytest.mark.asyncio
+    async def test_trend_follow_invalid_no_trend(self):
         judge = M2SetupJudge()
         config = JudgeConfig(timeframes=["M15"], params={"preset": "trendFollow"})
         m1_output = JudgeOutput(result={"trend": "NEUTRAL", "tradeAllowed": False}, confidence=0.3)
         input = _judge_input(previous_stages={"m1": m1_output})
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["setupValid"] is False
 
-    def test_breakout_upper(self):
+    @pytest.mark.asyncio
+    async def test_breakout_upper(self):
         judge = M2SetupJudge()
         config = JudgeConfig(timeframes=["M15"], params={"preset": "breakout"})
         # ema20 > donchian upper → breakout
         state = _state(ema20=154.0, donchian20_upper=153.0, adx14=25.0)
         m1_output = JudgeOutput(result={"trend": "UP"}, confidence=0.8)
         input = _judge_input(state=state, previous_stages={"m1": m1_output})
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["setupValid"] is True
         assert "BREAKOUT_UPPER" in output.reason_codes
 
-    def test_mean_reversion_buy(self):
+    @pytest.mark.asyncio
+    async def test_mean_reversion_buy(self):
         judge = M2SetupJudge()
         config = JudgeConfig(timeframes=["M15"], params={"preset": "meanReversion"})
         state = _state(ema20=147.5, rsi14=25.0, bb20_lower=148.0, volatility="normal")
         state.regime = "range"
         m1_output = JudgeOutput(result={"trend": "NEUTRAL", "regime": "range"}, confidence=0.5)
         input = _judge_input(state=state, previous_stages={"m1": m1_output})
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["setupValid"] is True
         assert output.result["side"] == "BUY"
 
@@ -178,7 +189,8 @@ class TestM2SetupJudge:
 
 
 class TestM3EntryJudge:
-    def test_buy_entry(self):
+    @pytest.mark.asyncio
+    async def test_buy_entry(self):
         judge = M3EntryJudge()
         config = JudgeConfig(
             timeframes=["M5"],
@@ -195,20 +207,21 @@ class TestM3EntryJudge:
             previous_stages={"m1": m1_output, "m2": m2_output},
             account=account,
         )
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["entry"] == "BUY"
         assert output.result["lotSize"] > 0
         assert output.result["tpPips"] > 0
         assert output.result["slPips"] > 0
         assert output.result["rrRatio"] > 0
 
-    def test_no_trade_when_setup_invalid(self):
+    @pytest.mark.asyncio
+    async def test_no_trade_when_setup_invalid(self):
         judge = M3EntryJudge()
         config = JudgeConfig(timeframes=["M5"])
         m1_output = JudgeOutput(result={"trend": "UP"}, confidence=0.8)
         m2_output = JudgeOutput(result={"setupValid": False}, confidence=0.3)
         input = _judge_input(previous_stages={"m1": m1_output, "m2": m2_output})
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["entry"] == "NO_TRADE"
 
 
@@ -260,7 +273,8 @@ class TestM4ExitJudge:
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
 
-    def test_hold_when_no_conditions_met(self):
+    @pytest.mark.asyncio
+    async def test_hold_when_no_conditions_met(self):
         judge = M4ExitJudge()
         config = JudgeConfig(timeframes=["M5"], params={
             "breakEven": True, "trailing": True, "partial": True, "maxHold": True,
@@ -268,21 +282,23 @@ class TestM4ExitJudge:
         })
         pos = self._make_position(current_price=150.1)  # small profit
         input = _judge_input(positions=[pos])
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["action"] == "HOLD"
 
-    def test_max_hold_time_exit(self):
+    @pytest.mark.asyncio
+    async def test_max_hold_time_exit(self):
         judge = M4ExitJudge()
         config = JudgeConfig(timeframes=["M5"], params={
             "maxHold": True, "maxHoldMinutes": 60,
         })
         pos = self._make_position(opened_at=NOW - timedelta(hours=2))
         input = _judge_input(positions=[pos])
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["action"] == "EXIT"
         assert "MAX_HOLD_TIME_EXCEEDED" in output.reason_codes
 
-    def test_break_even_triggered(self):
+    @pytest.mark.asyncio
+    async def test_break_even_triggered(self):
         judge = M4ExitJudge()
         config = JudgeConfig(timeframes=["M5"], params={
             "breakEven": True, "trailing": False, "partial": False, "maxHold": False,
@@ -291,15 +307,16 @@ class TestM4ExitJudge:
         # atr_pips ≈ 50, unrealized ≈ (151.0-150.0)*100 = 100 pips > 50
         pos = self._make_position(current_price=151.0)
         input = _judge_input(positions=[pos])
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["action"] == "ADJUST_TRAIL"
         assert output.result.get("breakEvenApplied") is True
 
-    def test_disabled_returns_hold(self):
+    @pytest.mark.asyncio
+    async def test_disabled_returns_hold(self):
         judge = M4ExitJudge()
         config = JudgeConfig(enabled=False, timeframes=["M5"])
         input = _judge_input(positions=[self._make_position()])
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert output.result["action"] == "HOLD"
         assert "M4_DISABLED" in output.reason_codes
 
@@ -360,7 +377,8 @@ class TestDecisionOrchestrator:
             guard_engine=GuardEngine(),
         )
 
-    def test_full_pipeline_entry(self):
+    @pytest.mark.asyncio
+    async def test_full_pipeline_entry(self):
         orch = self._build_orchestrator()
         state = _state(ema20=150.0, ema50=149.0, ema200=145.0, adx14=30.0, rsi14=55.0)
         account = AccountState(
@@ -368,7 +386,7 @@ class TestDecisionOrchestrator:
             monthly_pnl=0, peak_capital=1_000_000, current_capital=1_000_000,
             consecutive_losses=0, last_trade_was_loss=False, daily_profit_pct=0,
         )
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=account, now=NOW,
         )
         assert result.action == "ENTRY"
@@ -376,7 +394,8 @@ class TestDecisionOrchestrator:
         assert result.order.side == "BUY"
         assert result.order.lot_size > 0
 
-    def test_pipeline_halted_by_guard(self):
+    @pytest.mark.asyncio
+    async def test_pipeline_halted_by_guard(self):
         orch = self._build_orchestrator()
         orch.guard_engine.settings.max_daily_loss_pct = 5.0
         state = _state()
@@ -385,16 +404,18 @@ class TestDecisionOrchestrator:
             monthly_pnl=-60_000, peak_capital=1_000_000, current_capital=940_000,
             consecutive_losses=0, last_trade_was_loss=False, daily_profit_pct=0,
         )
-        result = orch.execute_pipeline(pair="USD_JPY", state=state, account=account, now=NOW)
+        result = await orch.execute_pipeline(pair="USD_JPY", state=state, account=account, now=NOW)
         assert result.action == "HALTED"
 
-    def test_pipeline_no_trade_range_avoid(self):
+    @pytest.mark.asyncio
+    async def test_pipeline_no_trade_range_avoid(self):
         orch = self._build_orchestrator()
         state = _state(adx14=15.0)  # low ADX → range → no trade
-        result = orch.execute_pipeline(pair="USD_JPY", state=state, now=NOW)
+        result = await orch.execute_pipeline(pair="USD_JPY", state=state, now=NOW)
         assert result.action == "NO_TRADE"
 
-    def test_pipeline_logs_recorded(self):
+    @pytest.mark.asyncio
+    async def test_pipeline_logs_recorded(self):
         orch = self._build_orchestrator()
         state = _state()
         account = AccountState(
@@ -402,7 +423,7 @@ class TestDecisionOrchestrator:
             monthly_pnl=0, peak_capital=1_000_000, current_capital=1_000_000,
             consecutive_losses=0, last_trade_was_loss=False, daily_profit_pct=0,
         )
-        orch.execute_pipeline(pair="USD_JPY", state=state, account=account, now=NOW)
+        await orch.execute_pipeline(pair="USD_JPY", state=state, account=account, now=NOW)
         logs = orch.get_logs()
         # Should have at least M1, M2, M3 logs
         stages = [log["stage"] for log in logs]
@@ -414,7 +435,8 @@ class TestDecisionOrchestrator:
             assert "elapsed_ms" in log
             assert "execution_id" in log
 
-    def test_exit_management(self):
+    @pytest.mark.asyncio
+    async def test_exit_management(self):
         from types import SimpleNamespace
         orch = self._build_orchestrator()
         state = _state()
@@ -424,7 +446,7 @@ class TestDecisionOrchestrator:
             opened_at=NOW, break_even_applied=False,
             trail_active=False, trail_price=None,
         )
-        output = orch.execute_exit_management(
+        output = await orch.execute_exit_management(
             pair="USD_JPY", state=state, positions=[pos], now=NOW,
         )
         assert output.result["action"] in ("HOLD", "EXIT", "ADJUST_TRAIL", "PARTIAL")
@@ -456,76 +478,62 @@ class TestOrchestratorAdditional:
         defaults.update(overrides)
         return AccountState(**defaults)
 
-    def test_guard_block_returns_blocked(self):
+    @pytest.mark.asyncio
+    async def test_guard_block_returns_blocked(self):
         """Guard entry_allowed=False → BLOCKED."""
         orch = self._build_orchestrator()
         state = _state()
         guard = _guard_state(entry_allowed=False, blocking_guards=["SG_TEST"])
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, guard_state=guard, now=NOW,
         )
         assert result.action == "BLOCKED"
         assert "SG_TEST" in result._debug.get("blocked_by", [])
 
-    def test_m2_fail_stops_at_mx_gate(self):
+    @pytest.mark.asyncio
+    async def test_m2_fail_stops_at_mx_gate(self):
         """M2 setupValid=False → MX gate blocks M3 execution → NO_TRADE."""
         orch = self._build_orchestrator()
-        # M1 passes (tradeAllowed=True) but M2 fails (setupValid=False)
-        # adx14=30.0 → trend mode, ema20>ema50>ema200 → UP → tradeAllowed
-        # but M2 trendFollow needs ema pullback which this doesn't match
         state = _state(
             ema20=150.0, ema50=149.0, ema200=145.0, adx14=30.0,
             rsi14=55.0,
-            # Make M2 fail: ema20 far above ema50, no pullback zone
             bb20_upper=200.0, bb20_middle=190.0, bb20_lower=180.0,
         )
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=self._account(), now=NOW,
         )
-        # With default trendFollow, if no pullback detected, M2 returns setupValid=False
-        # This causes should_execute_m3 to return False → NO_TRADE with mx_reason
         assert result.action in ("NO_TRADE", "ENTRY")
-        # If M2 does pass due to simple trend-follow logic, that's OK too
 
-    def test_m3_no_trade(self):
+    @pytest.mark.asyncio
+    async def test_m3_no_trade(self):
         """M3 returns NO_TRADE → pipeline returns NO_TRADE."""
         orch = self._build_orchestrator()
         state = _state(ema20=150.0, ema50=149.0, ema200=145.0, adx14=30.0)
-        # M2 invalid setup → M3 returns NO_TRADE
-        m2_output = JudgeOutput(result={"setupValid": False}, confidence=0.3)
-        m1_output = JudgeOutput(result={"tradeAllowed": True, "trend": "UP"}, confidence=0.8)
-        # Provide guard_state to skip guard evaluation
         guard = _guard_state(entry_allowed=True)
-
-        # Use custom configs to control the flow
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=self._account(),
             guard_state=guard, now=NOW,
         )
-        # M1 allows trade, but M2/MX may block → NO_TRADE
         assert result.action in ("NO_TRADE", "ENTRY")
 
-    def test_pre_entry_guard_block(self):
+    @pytest.mark.asyncio
+    async def test_pre_entry_guard_block(self):
         """Pre-entry guard blocks → BLOCKED."""
         orch = self._build_orchestrator()
-        # Set RR sanity check to block: extremely low TP relative to SL
         orch.guard_engine.settings.exec_rr_sanity_enabled = True
-        orch.guard_engine.settings.exec_rr_sanity_min = 999.0  # impossibly high RR requirement
+        orch.guard_engine.settings.exec_rr_sanity_min = 999.0
         state = _state(ema20=150.0, ema50=149.0, ema200=145.0, adx14=30.0)
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=self._account(), now=NOW,
         )
-        if result.action == "ENTRY":
-            # If M3 produced an entry but RR check is too strict, it should block
-            pass
-        # We just verify the pipeline completes without error
         assert result.action in ("ENTRY", "BLOCKED", "NO_TRADE")
 
-    def test_log_has_elapsed_ms_and_execution_id(self):
+    @pytest.mark.asyncio
+    async def test_log_has_elapsed_ms_and_execution_id(self):
         """Each pipeline log entry must have elapsed_ms and execution_id."""
         orch = self._build_orchestrator()
         state = _state()
-        orch.execute_pipeline(pair="USD_JPY", state=state, account=self._account(), now=NOW)
+        await orch.execute_pipeline(pair="USD_JPY", state=state, account=self._account(), now=NOW)
         logs = orch.get_logs()
         assert len(logs) >= 1
         for log in logs:
@@ -534,11 +542,12 @@ class TestOrchestratorAdditional:
             assert "execution_id" in log
             assert len(log["execution_id"]) > 0
 
-    def test_log_contains_stage_info(self):
+    @pytest.mark.asyncio
+    async def test_log_contains_stage_info(self):
         """Log entries contain stage, pair, output_result, config_params."""
         orch = self._build_orchestrator()
         state = _state()
-        orch.execute_pipeline(pair="USD_JPY", state=state, account=self._account(), now=NOW)
+        await orch.execute_pipeline(pair="USD_JPY", state=state, account=self._account(), now=NOW)
         logs = orch.get_logs()
         for log in logs:
             assert "stage" in log
@@ -547,16 +556,18 @@ class TestOrchestratorAdditional:
             assert "output_result" in log
             assert "config_params" in log
 
-    def test_clear_logs(self):
+    @pytest.mark.asyncio
+    async def test_clear_logs(self):
         """clear_logs() empties the log buffer."""
         orch = self._build_orchestrator()
         state = _state()
-        orch.execute_pipeline(pair="USD_JPY", state=state, account=self._account(), now=NOW)
+        await orch.execute_pipeline(pair="USD_JPY", state=state, account=self._account(), now=NOW)
         assert len(orch.get_logs()) > 0
         orch.clear_logs()
         assert len(orch.get_logs()) == 0
 
-    def test_exit_management_logs(self):
+    @pytest.mark.asyncio
+    async def test_exit_management_logs(self):
         """execute_exit_management records M4 log."""
         from types import SimpleNamespace
         orch = self._build_orchestrator()
@@ -567,30 +578,30 @@ class TestOrchestratorAdditional:
             opened_at=NOW, break_even_applied=False,
             trail_active=False, trail_price=None,
         )
-        orch.execute_exit_management(pair="USD_JPY", state=state, positions=[pos], now=NOW)
+        await orch.execute_exit_management(pair="USD_JPY", state=state, positions=[pos], now=NOW)
         logs = orch.get_logs()
         m4_logs = [l for l in logs if l["stage"] == "m4"]
         assert len(m4_logs) == 1
         assert "elapsed_ms" in m4_logs[0]
 
-    def test_execution_id_unique(self):
+    @pytest.mark.asyncio
+    async def test_execution_id_unique(self):
         """Each pipeline execution gets a unique execution_id."""
         orch = self._build_orchestrator()
         state = _state()
         account = self._account()
-        orch.execute_pipeline(pair="USD_JPY", state=state, account=account, now=NOW)
-        orch.execute_pipeline(pair="USD_JPY", state=state, account=account, now=NOW)
+        await orch.execute_pipeline(pair="USD_JPY", state=state, account=account, now=NOW)
+        await orch.execute_pipeline(pair="USD_JPY", state=state, account=account, now=NOW)
         logs = orch.get_logs()
         exec_ids = {log["execution_id"] for log in logs}
-        # Two pipeline runs → at least 2 distinct execution_ids
         assert len(exec_ids) >= 2
 
-    def test_pipeline_now_defaults_to_utc(self):
+    @pytest.mark.asyncio
+    async def test_pipeline_now_defaults_to_utc(self):
         """When now=None, pipeline uses datetime.now(utc)."""
         orch = self._build_orchestrator()
         state = _state()
-        result = orch.execute_pipeline(pair="USD_JPY", state=state, account=self._account())
-        # Should not raise; execution_id present
+        result = await orch.execute_pipeline(pair="USD_JPY", state=state, account=self._account())
         assert result.execution_id != ""
 
 
@@ -621,24 +632,27 @@ class TestBaseJudgeConformance:
             assert isinstance(config, dict), f"{cls.__name__}.describe_config() not dict"
             assert len(config) > 0, f"{cls.__name__}.describe_config() is empty"
 
-    def test_m1_debug_output(self):
+    @pytest.mark.asyncio
+    async def test_m1_debug_output(self):
         """M1 output has _debug with expected fields."""
         judge = M1DirectionJudge()
         config = JudgeConfig(timeframes=["H1"])
-        output = judge.judge(_judge_input(), config)
+        output = await judge.judge(_judge_input(), config)
         assert isinstance(output._debug, dict)
         assert len(output._debug) > 0
 
-    def test_m2_debug_output(self):
+    @pytest.mark.asyncio
+    async def test_m2_debug_output(self):
         """M2 output has _debug."""
         judge = M2SetupJudge()
         config = JudgeConfig(timeframes=["M15"], params={"preset": "trendFollow"})
         m1_output = JudgeOutput(result={"trend": "UP", "tradeAllowed": True}, confidence=0.8)
         input = _judge_input(previous_stages={"m1": m1_output})
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert isinstance(output._debug, dict)
 
-    def test_m3_debug_output(self):
+    @pytest.mark.asyncio
+    async def test_m3_debug_output(self):
         """M3 output has _debug with position sizing info."""
         judge = M3EntryJudge()
         config = JudgeConfig(timeframes=["M5"], params={"tpSlMode": "atr", "riskPerTradePct": 2.0})
@@ -650,10 +664,11 @@ class TestBaseJudgeConformance:
             consecutive_losses=0, last_trade_was_loss=False, daily_profit_pct=0,
         )
         input = _judge_input(previous_stages={"m1": m1_output, "m2": m2_output}, account=account)
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert isinstance(output._debug, dict)
 
-    def test_m4_debug_output(self):
+    @pytest.mark.asyncio
+    async def test_m4_debug_output(self):
         """M4 output has _debug."""
         from types import SimpleNamespace
         judge = M4ExitJudge()
@@ -668,5 +683,5 @@ class TestBaseJudgeConformance:
             trail_active=False, trail_price=None,
         )
         input = _judge_input(positions=[pos])
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         assert isinstance(output._debug, dict)

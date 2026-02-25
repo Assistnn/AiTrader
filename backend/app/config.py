@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     JWT_REFRESH_EXPIRE_DAYS: int = 7  # 7 days per design
     MASTER_ENCRYPTION_KEY: str = "change-me-in-production"
 
+    # --- AI Integration (05_AI統合.md, 14_コスト管理.md) ---
+    AI_DEFAULT_PROVIDER: str = "openai"
+    AI_DEFAULT_MODEL: str = "gpt-4o"
+    AI_RATE_LIMIT_PER_TRADER: int = 10  # calls/minute per trader
+    AI_RATE_LIMIT_GLOBAL: int = 30  # calls/minute global
+    AI_DAILY_TOKEN_BUDGET: int = 1_000_000  # daily token limit
+    AI_BUDGET_WARNING_PCT: int = 80  # warning threshold %
+    OPENAI_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""
+    CLAUDE_API_KEY: str = ""
+
     # --- CORS ---
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 

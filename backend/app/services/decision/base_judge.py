@@ -15,7 +15,7 @@ class BaseJudge(ABC):
     """Base class for all pipeline judgment modules. Reference: Section 2-1"""
 
     @abstractmethod
-    def judge(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
+    async def judge(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
         """Execute judgment and return result."""
         ...
 

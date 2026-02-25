@@ -6,8 +6,13 @@ Reference: 04_判定パイプライン Section 3
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from app.services.decision.base_judge import BaseJudge
 from app.services.decision.decision_types import JudgeConfig, JudgeInput, JudgeOutput
+
+if TYPE_CHECKING:
+    from app.services.ai.judge_helper import AIJudgeHelper
 
 
 class M1DirectionJudge(BaseJudge):
@@ -19,11 +24,47 @@ class M1DirectionJudge(BaseJudge):
     Indicators: EMA(20/50/200), ADX(14), ATR(14), Donchian(20)
     """
 
-    def judge(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
+    def __init__(self, ai_helper: AIJudgeHelper | None = None) -> None:
+        self._ai_helper = ai_helper
+
+    async def judge(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
         if config.mode == "rule":
             return self._judge_rule(input, config)
-        # aiAssist/aiFull modes will be implemented in Phase 3
+        if config.mode == "aiAssist":
+            return await self._judge_ai_assist(input, config)
+        if config.mode == "aiFull":
+            return await self._judge_ai_full(input, config)
         return self._judge_rule(input, config)
+
+    async def _judge_ai_assist(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
+        """aiAssist: rule first, then AI confirmation. Reference: 05_AI統合 Section 4-1"""
+        rule_result = self._judge_rule(input, config)
+        if self._ai_helper is None:
+            return rule_result
+        ai_result = await self._ai_helper.execute_ai_judgment(
+            stage="m1", input=input, config=config, rule_result=rule_result,
+        )
+        if ai_result and ai_result.confidence >= config.params.get("minConfidence", 0.7):
+            ai_result._debug["ai_adopted"] = True
+            return ai_result
+        rule_result._debug["ai_adopted"] = False
+        rule_result._debug["ai_fallback_reason"] = "low_confidence_or_failure"
+        return rule_result
+
+    async def _judge_ai_full(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
+        """aiFull: AI only, rule fallback. Reference: 05_AI統合 Section 4-2"""
+        if self._ai_helper is None:
+            return self._judge_rule(input, config)
+        ai_result = await self._ai_helper.execute_ai_judgment(
+            stage="m1", input=input, config=config, rule_result=None,
+        )
+        if ai_result:
+            ai_result._debug["ai_adopted"] = True
+            return ai_result
+        fallback = self._judge_rule(input, config)
+        fallback._debug["ai_adopted"] = False
+        fallback._debug["ai_fallback_reason"] = "ai_failure"
+        return fallback
 
     def _judge_rule(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
         """M1 rule mode judgment. Reference: Section 3-4"""

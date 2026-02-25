@@ -3,6 +3,7 @@ Pipeline full integration tests: end-to-end flows through the complete pipeline.
 Reference: 04_判定パイプライン, 03_セーフガードエンジン, 13_テスト戦略
 """
 
+import pytest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -78,12 +79,13 @@ def _build_orchestrator(**settings_overrides) -> DecisionOrchestrator:
 class TestPipelineFullEntry:
     """Complete entry flow: Guard → M1 → M2 → MX → M3 → PreGuard → ENTRY."""
 
-    def test_full_entry_flow(self):
+    @pytest.mark.asyncio
+    async def test_full_entry_flow(self):
         orch = _build_orchestrator()
         state = _state(
             ema20=150.0, ema50=149.0, ema200=145.0, adx14=30.0, rsi14=55.0,
         )
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=_account(), now=NOW,
         )
         assert result.action == "ENTRY"
@@ -101,14 +103,15 @@ class TestPipelineFullEntry:
 class TestPipelineGuardHalt:
     """Guard HALT flow: daily loss exceeded → HALTED."""
 
-    def test_daily_loss_halt(self):
+    @pytest.mark.asyncio
+    async def test_daily_loss_halt(self):
         orch = _build_orchestrator(max_daily_loss_pct=5.0)
         state = _state()
         account = _account(
             daily_realized_pnl=-60_000,  # 6% loss on 1M capital
             current_capital=940_000,
         )
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=account, now=NOW,
         )
         assert result.action == "HALTED"
@@ -119,12 +122,13 @@ class TestPipelineGuardHalt:
 class TestPipelinePreEntryBlock:
     """Pre-entry Guard BLOCK flow: RR sanity fails → BLOCKED."""
 
-    def test_rr_sanity_block(self):
+    @pytest.mark.asyncio
+    async def test_rr_sanity_block(self):
         orch = _build_orchestrator(
             rr_min_threshold=999.0,  # impossibly high RR requirement → blocks any entry
         )
         state = _state(ema20=150.0, ema50=149.0, ema200=145.0, adx14=30.0)
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=_account(), now=NOW,
         )
         assert result.action == "BLOCKED"
@@ -134,13 +138,14 @@ class TestPipelinePreEntryBlock:
 class TestPipelineDowntrendSell:
     """Downtrend flow: EMA bearish → SELL entry."""
 
-    def test_downtrend_sell(self):
+    @pytest.mark.asyncio
+    async def test_downtrend_sell(self):
         orch = _build_orchestrator()
         state = _state(
             trend="DOWN", ema_alignment="bearish",
             ema20=145.0, ema50=148.0, ema200=150.0, adx14=30.0, rsi14=40.0,
         )
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=_account(), now=NOW,
         )
         if result.action == "ENTRY":
@@ -153,13 +158,14 @@ class TestPipelineDowntrendSell:
 class TestPipelineRangeNoTrade:
     """Range NO_TRADE flow: low ADX → NEUTRAL → NO_TRADE."""
 
-    def test_range_no_trade(self):
+    @pytest.mark.asyncio
+    async def test_range_no_trade(self):
         orch = _build_orchestrator()
         state = _state(
             trend="NEUTRAL", regime="range",
             adx14=15.0, ema20=150.0, ema50=150.0, ema200=150.0,
         )
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=_account(), now=NOW,
         )
         assert result.action == "NO_TRADE"
@@ -168,7 +174,8 @@ class TestPipelineRangeNoTrade:
 class TestPipelineExitManagement:
     """Exit management flow through M4."""
 
-    def test_exit_management_hold(self):
+    @pytest.mark.asyncio
+    async def test_exit_management_hold(self):
         orch = _build_orchestrator()
         state = _state()
         pos = SimpleNamespace(
@@ -177,7 +184,7 @@ class TestPipelineExitManagement:
             opened_at=NOW, break_even_applied=False,
             trail_active=False, trail_price=None,
         )
-        output = orch.execute_exit_management(
+        output = await orch.execute_exit_management(
             pair="USD_JPY", state=state, positions=[pos], now=NOW,
         )
         assert output.result["action"] in ("HOLD", "EXIT", "ADJUST_TRAIL", "PARTIAL")
@@ -186,20 +193,22 @@ class TestPipelineExitManagement:
 class TestPipelineDebugTransparency:
     """_debug field transparency: all outputs must have _debug."""
 
-    def test_entry_result_has_debug(self):
+    @pytest.mark.asyncio
+    async def test_entry_result_has_debug(self):
         orch = _build_orchestrator()
         state = _state(ema20=150.0, ema50=149.0, ema200=145.0, adx14=30.0)
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=_account(), now=NOW,
         )
         assert isinstance(result._debug, dict)
         if result.m1_output:
             assert isinstance(result.m1_output._debug, dict)
 
-    def test_no_trade_result_has_debug(self):
+    @pytest.mark.asyncio
+    async def test_no_trade_result_has_debug(self):
         orch = _build_orchestrator()
         state = _state(adx14=15.0)
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=_account(), now=NOW,
         )
         assert result.action == "NO_TRADE"
@@ -209,7 +218,8 @@ class TestPipelineDebugTransparency:
 class TestPipelineMultipleBlockingGuards:
     """Multiple guards blocking simultaneously."""
 
-    def test_multiple_blocks(self):
+    @pytest.mark.asyncio
+    async def test_multiple_blocks(self):
         orch = _build_orchestrator(
             max_daily_loss_pct=5.0,
             max_monthly_dd_pct=10.0,
@@ -220,7 +230,7 @@ class TestPipelineMultipleBlockingGuards:
             monthly_pnl=-120_000,  # 12% monthly DD
             current_capital=880_000,
         )
-        result = orch.execute_pipeline(
+        result = await orch.execute_pipeline(
             pair="USD_JPY", state=state, account=account, now=NOW,
         )
         assert result.action == "HALTED"

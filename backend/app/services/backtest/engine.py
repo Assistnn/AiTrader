@@ -46,11 +46,26 @@ class BacktestEngine:
         self.normalizer = normalizer or PriceNormalizer()
 
     def run(self, config: BacktestConfig, bars: list[OHLCV]) -> BacktestResult:
-        """バックテスト実行（同期）.
+        """バックテスト実行（同期ラッパー）.
 
         bars は start_date〜end_date の OHLCV リスト（時系列昇順）。
         Look-ahead Bias は呼出元で bars を事前取得する構造で防止。
+        内部的にasyncを使用する場合はrun_asyncを呼ぶ。
+        ruleモードでは同期的に動作する。
         """
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            import nest_asyncio  # type: ignore[import-untyped]
+            nest_asyncio.apply()
+            return loop.run_until_complete(self.run_async(config, bars))
+        return asyncio.run(self.run_async(config, bars))
+
+    async def run_async(self, config: BacktestConfig, bars: list[OHLCV]) -> BacktestResult:
+        """バックテスト実行（async）."""
         if not bars:
             return BacktestResult(config=config, error="No bars provided")
 
@@ -105,7 +120,7 @@ class BacktestEngine:
             # Step 6: New entry evaluation (if no open positions for simplicity)
             if not open_positions:
                 account = self._build_account(config, mock_exchange, recorder)
-                result = self.orchestrator.execute_pipeline(
+                result = await self.orchestrator.execute_pipeline(
                     pair=config.pair,
                     state=state,
                     account=account,

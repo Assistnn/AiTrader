@@ -6,8 +6,13 @@ Reference: 04_判定パイプライン Section 4
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from app.services.decision.base_judge import BaseJudge
 from app.services.decision.decision_types import JudgeConfig, JudgeInput, JudgeOutput
+
+if TYPE_CHECKING:
+    from app.services.ai.judge_helper import AIJudgeHelper
 
 
 class M2SetupJudge(BaseJudge):
@@ -19,9 +24,36 @@ class M2SetupJudge(BaseJudge):
     Indicators: EMA(20/50), RSI(14), Bollinger(20,2), ATR(14), Swing
     """
 
-    def judge(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
+    def __init__(self, ai_helper: AIJudgeHelper | None = None) -> None:
+        self._ai_helper = ai_helper
+
+    async def judge(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
         if config.mode == "rule":
             return self._judge_rule(input, config)
+        if config.mode == "aiAssist":
+            rule_result = self._judge_rule(input, config)
+            if self._ai_helper is None:
+                return rule_result
+            ai_result = await self._ai_helper.execute_ai_judgment(
+                stage="m2", input=input, config=config, rule_result=rule_result,
+            )
+            if ai_result and ai_result.confidence >= config.params.get("minConfidence", 0.7):
+                ai_result._debug["ai_adopted"] = True
+                return ai_result
+            rule_result._debug["ai_adopted"] = False
+            return rule_result
+        if config.mode == "aiFull":
+            if self._ai_helper is None:
+                return self._judge_rule(input, config)
+            ai_result = await self._ai_helper.execute_ai_judgment(
+                stage="m2", input=input, config=config, rule_result=None,
+            )
+            if ai_result:
+                ai_result._debug["ai_adopted"] = True
+                return ai_result
+            fallback = self._judge_rule(input, config)
+            fallback._debug["ai_adopted"] = False
+            return fallback
         return self._judge_rule(input, config)
 
     def _judge_rule(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:

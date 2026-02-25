@@ -189,7 +189,7 @@ class TestLogMasking:
 
 
 class TestTenantAwareSession:
-    def test_permission_error_on_delete_other_user(self):
+    async def test_permission_error_on_delete_other_user(self):
         """TenantAwareSession prevents deleting resources of other users."""
 
         class FakeModel:
@@ -201,10 +201,7 @@ class TestTenantAwareSession:
 
         session = TenantAwareSession(FakeSession(), user_id=1)
         with pytest.raises(PermissionError):
-            import asyncio
-            asyncio.get_event_loop().run_until_complete(
-                session.delete(FakeModel())
-            )
+            await session.delete(FakeModel())
 
     def test_add_sets_user_id(self):
         """TenantAwareSession auto-sets user_id on add."""

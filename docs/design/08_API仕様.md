@@ -474,3 +474,4 @@ INTERNAL_ERROR                500    内部エラー
 | 日付 | 変更内容 | 理由 |
 |---|---|---|
 | 2026-02-22 | 初版作成 | design_plan.md に基づく新規作成 |
+| 2026-02-25 | WebSocket 4チャネル定義の実装整合確認 | 監査承認: prices/trader_updates/alerts/pipeline_statusの4チャネルが設計書通りに実装済みであることを確認 |

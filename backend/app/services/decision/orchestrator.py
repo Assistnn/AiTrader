@@ -50,7 +50,7 @@ class DecisionOrchestrator:
         self.mx = mx or MXIntegrator()
         self._logs: list[dict] = []  # in-memory log buffer (DB persistence in Phase 1-8)
 
-    def execute_pipeline(
+    async def execute_pipeline(
         self,
         pair: str,
         state: Any,
@@ -112,7 +112,7 @@ class DecisionOrchestrator:
 
         # 1. M1: Direction judgment
         m1_cfg = m1_config or JudgeConfig(timeframes=["D1", "H4", "H1"])
-        m1_output = self._execute_stage("m1", self.m1, judge_input, m1_cfg, execution_id)
+        m1_output = await self._execute_stage("m1", self.m1, judge_input, m1_cfg, execution_id)
 
         if not m1_output.result.get("tradeAllowed", False):
             return PipelineResult(
@@ -127,7 +127,7 @@ class DecisionOrchestrator:
         judge_input.previous_stages["m1"] = m1_output
         m2_cfg = m2_config or JudgeConfig(timeframes=["H1", "M30", "M15"],
                                            params={"preset": "trendFollow"})
-        m2_output = self._execute_stage("m2", self.m2, judge_input, m2_cfg, execution_id)
+        m2_output = await self._execute_stage("m2", self.m2, judge_input, m2_cfg, execution_id)
 
         # 3. MX integration check
         if not self.mx.should_execute_m3(m1_output, m2_output):
@@ -144,7 +144,7 @@ class DecisionOrchestrator:
         judge_input.previous_stages["m2"] = m2_output
         m3_cfg = m3_config or JudgeConfig(timeframes=["M5", "M1"],
                                            params={"tpSlMode": "atr", "riskPerTradePct": 2.0})
-        m3_output = self._execute_stage("m3", self.m3, judge_input, m3_cfg, execution_id)
+        m3_output = await self._execute_stage("m3", self.m3, judge_input, m3_cfg, execution_id)
 
         entry = m3_output.result.get("entry", "NO_TRADE")
         if entry == "NO_TRADE":
@@ -213,7 +213,7 @@ class DecisionOrchestrator:
             _debug={"mx_decision": mx_debug},
         )
 
-    def execute_exit_management(
+    async def execute_exit_management(
         self,
         pair: str,
         state: Any,
@@ -257,9 +257,9 @@ class DecisionOrchestrator:
             timeframes=["M5", "M1"],
             params={"breakEven": True, "trailing": True, "partial": True, "maxHold": True},
         )
-        return self._execute_stage("m4", self.m4, judge_input, m4_cfg, execution_id)
+        return await self._execute_stage("m4", self.m4, judge_input, m4_cfg, execution_id)
 
-    def _execute_stage(
+    async def _execute_stage(
         self,
         stage: str,
         judge: BaseJudge,
@@ -273,7 +273,7 @@ class DecisionOrchestrator:
         Reference: Section 8-3 (principle B: automatic logging)
         """
         start_time = time.monotonic()
-        output = judge.judge(input, config)
+        output = await judge.judge(input, config)
         elapsed_ms = (time.monotonic() - start_time) * 1000
 
         # Automatic log entry (principle B)
