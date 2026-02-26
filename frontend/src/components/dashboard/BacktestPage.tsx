@@ -13,15 +13,22 @@ import { formatPct, formatDateJst } from "@/lib/utils";
 import { apiClient } from "@/lib/api";
 import type { BacktestRun, BacktestMetrics } from "@/types/api";
 
+const statusLabels: Record<string, string> = {
+  completed: "完了",
+  failed: "失敗",
+  running: "実行中",
+  pending: "待機中",
+};
+
 function MetricsPanel({ metrics }: { metrics: BacktestMetrics }) {
   const items = [
-    { label: "Total Trades", value: String(metrics.totalTrades) },
-    { label: "Win Rate", value: formatPct(metrics.winRate * 100) },
-    { label: "Profit Factor", value: metrics.profitFactor.toFixed(2) },
-    { label: "Max Drawdown", value: formatPct(metrics.maxDrawdownPct) },
-    { label: "Sharpe Ratio", value: metrics.sharpeRatio.toFixed(2) },
-    { label: "Avg RR Ratio", value: metrics.avgRrRatio.toFixed(2) },
-    { label: "Total P&L %", value: formatPct(metrics.totalPnlPct) },
+    { label: "総取引数", value: String(metrics.totalTrades) },
+    { label: "勝率", value: formatPct(metrics.winRate * 100) },
+    { label: "プロフィットファクター", value: metrics.profitFactor.toFixed(2) },
+    { label: "最大ドローダウン", value: formatPct(metrics.maxDrawdownPct) },
+    { label: "シャープレシオ", value: metrics.sharpeRatio.toFixed(2) },
+    { label: "平均RR比率", value: metrics.avgRrRatio.toFixed(2) },
+    { label: "合計損益率", value: formatPct(metrics.totalPnlPct) },
   ];
 
   return (
@@ -62,14 +69,16 @@ function BacktestRow({
       </span>
       <span className="w-20">{run.pair}</span>
       <span className="w-12">{run.timeframe}</span>
-      <Badge variant={statusVariant}>{run.status}</Badge>
+      <Badge variant={statusVariant}>
+        {statusLabels[run.status] || run.status}
+      </Badge>
       {run.metrics && (
         <>
-          <span className="ml-auto w-20 text-right tabular-nums">
-            {run.metrics.totalTrades} trades
+          <span className="ml-auto w-24 text-right tabular-nums">
+            {run.metrics.totalTrades} 取引
           </span>
-          <span className="w-20 text-right tabular-nums">
-            {formatPct(run.metrics.winRate * 100)} WR
+          <span className="w-24 text-right tabular-nums">
+            勝率 {formatPct(run.metrics.winRate * 100)}
           </span>
         </>
       )}
@@ -84,7 +93,6 @@ export function BacktestPage() {
   const [selected, setSelected] = useState<BacktestRun | null>(null);
   const [creating, setCreating] = useState(false);
 
-  // New backtest form state
   const [form, setForm] = useState({
     traderId: "",
     pair: "USD_JPY",
@@ -121,17 +129,17 @@ export function BacktestPage() {
           {/* Left: Run form */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">New Backtest</CardTitle>
+              <CardTitle className="text-base">新規バックテスト</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               <div>
-                <label className="text-xs font-medium">Trader</label>
+                <label className="text-xs font-medium">トレーダー</label>
                 <Select
                   value={form.traderId}
                   options={
                     traders?.map((t) => ({
                       value: String(t.id),
-                      label: t.name,
+                      label: t.traderName,
                     })) || []
                   }
                   onChange={(e) =>
@@ -140,7 +148,7 @@ export function BacktestPage() {
                 />
               </div>
               <div>
-                <label className="text-xs font-medium">Pair</label>
+                <label className="text-xs font-medium">通貨ペア</label>
                 <Select
                   value={form.pair}
                   options={[
@@ -152,13 +160,13 @@ export function BacktestPage() {
                 />
               </div>
               <div>
-                <label className="text-xs font-medium">Timeframe</label>
+                <label className="text-xs font-medium">時間足</label>
                 <Select
                   value={form.timeframe}
                   options={[
-                    { value: "M5", label: "M5" },
-                    { value: "M15", label: "M15" },
-                    { value: "H1", label: "H1" },
+                    { value: "M5", label: "5分" },
+                    { value: "M15", label: "15分" },
+                    { value: "H1", label: "1時間" },
                   ]}
                   onChange={(e) =>
                     setForm({ ...form, timeframe: e.target.value })
@@ -166,7 +174,7 @@ export function BacktestPage() {
                 />
               </div>
               <div>
-                <label className="text-xs font-medium">Start Date</label>
+                <label className="text-xs font-medium">開始日</label>
                 <Input
                   type="date"
                   value={form.startDate}
@@ -176,7 +184,7 @@ export function BacktestPage() {
                 />
               </div>
               <div>
-                <label className="text-xs font-medium">End Date</label>
+                <label className="text-xs font-medium">終了日</label>
                 <Input
                   type="date"
                   value={form.endDate}
@@ -190,7 +198,7 @@ export function BacktestPage() {
                 onClick={handleCreate}
                 disabled={creating}
               >
-                {creating ? "Running..." : "Run Backtest"}
+                {creating ? "実行中..." : "バックテスト実行"}
               </Button>
             </CardContent>
           </Card>
@@ -201,7 +209,7 @@ export function BacktestPage() {
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">
-                    Results: {selected.pair} {selected.timeframe}
+                    結果: {selected.pair} {selected.timeframe}
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
@@ -212,39 +220,52 @@ export function BacktestPage() {
 
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Backtest History</CardTitle>
+                <CardTitle className="text-base">バックテスト履歴</CardTitle>
               </CardHeader>
               <CardContent>
-                {backtests?.items.map((run) => (
-                  <BacktestRow
-                    key={run.id}
-                    run={run}
-                    onSelect={setSelected}
-                  />
-                ))}
-                {backtests && backtests.totalPages > 1 && (
-                  <div className="flex items-center justify-center gap-2 pt-3">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={page <= 1}
-                      onClick={() => setPage(page - 1)}
-                    >
-                      Prev
-                    </Button>
-                    <span className="text-sm text-muted-foreground">
-                      {page} / {backtests.totalPages}
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={page >= backtests.totalPages}
-                      onClick={() => setPage(page + 1)}
-                    >
-                      Next
-                    </Button>
-                  </div>
-                )}
+                {(() => {
+                  const items = backtests?.data ?? [];
+                  const totalPages = backtests?.pagination?.totalPages ?? 1;
+                  return (
+                    <>
+                      {items.map((run) => (
+                        <BacktestRow
+                          key={run.id}
+                          run={run}
+                          onSelect={setSelected}
+                        />
+                      ))}
+                      {items.length === 0 && (
+                        <p className="py-4 text-center text-sm text-muted-foreground">
+                          バックテスト履歴がありません
+                        </p>
+                      )}
+                      {totalPages > 1 && (
+                        <div className="flex items-center justify-center gap-2 pt-3">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={page <= 1}
+                            onClick={() => setPage(page - 1)}
+                          >
+                            前へ
+                          </Button>
+                          <span className="text-sm text-muted-foreground">
+                            {page} / {totalPages}
+                          </span>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={page >= totalPages}
+                            onClick={() => setPage(page + 1)}
+                          >
+                            次へ
+                          </Button>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </CardContent>
             </Card>
           </div>

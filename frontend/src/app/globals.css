@@ -5,11 +5,11 @@
 @layer base {
   :root {
     --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --foreground: 224 71% 4%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 224 71% 4%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover-foreground: 224 71% 4%;
     --primary: 222.2 47.4% 11.2%;
     --primary-foreground: 210 40% 98%;
     --secondary: 210 40% 96.1%;
@@ -24,14 +24,30 @@
     --input: 214.3 31.8% 91.4%;
     --ring: 222.2 84% 4.9%;
     --radius: 0.5rem;
+
+    /* Figma: trading colors */
+    --profit: 142.1 76.2% 36.3%;
+    --loss: 0 84.2% 60.2%;
+    --bid: 0 72.2% 50.6%;
+    --ask: 221.2 83.2% 53.3%;
+
+    /* Figma: nav active state */
+    --nav-active: 224 71% 4%;
+    --nav-active-foreground: 0 0% 100%;
+
+    /* Figma: status colors */
+    --status-running: 142.1 76.2% 36.3%;
+    --status-stopped: 215.4 16.3% 46.9%;
+    --status-warning: 47.9 95.8% 53.1%;
+    --status-error: 0 84.2% 60.2%;
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
+    --background: 224 71% 4%;
     --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
+    --card: 222.2 84% 7%;
     --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
+    --popover: 222.2 84% 7%;
     --popover-foreground: 210 40% 98%;
     --primary: 210 40% 98%;
     --primary-foreground: 222.2 47.4% 11.2%;
@@ -43,9 +59,23 @@
     --accent-foreground: 210 40% 98%;
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
+    --border: 220 13% 25%;
     --input: 217.2 32.6% 17.5%;
     --ring: 212.7 26.8% 83.9%;
+
+    /* Dark mode trading colors */
+    --profit: 142.1 70.6% 45.3%;
+    --loss: 0 84.2% 60.2%;
+    --bid: 0 72.2% 55%;
+    --ask: 221.2 83.2% 60%;
+
+    --nav-active: 210 40% 98%;
+    --nav-active-foreground: 224 71% 4%;
+
+    --status-running: 142.1 70.6% 45.3%;
+    --status-stopped: 215 20.2% 65.1%;
+    --status-warning: 47.9 95.8% 53.1%;
+    --status-error: 0 84.2% 60.2%;
   }
 }
 

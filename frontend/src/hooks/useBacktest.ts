@@ -4,13 +4,13 @@
  */
 
 import useSWR from "swr";
-import { fetcher } from "@/lib/api";
+import { fetcher, paginatedFetcher } from "@/lib/api";
 import type { PaginatedResponse, BacktestRun } from "@/types/api";
 
 export function useBacktestList(page: number, perPage = 20) {
   return useSWR<PaginatedResponse<BacktestRun>>(
     `/api/v1/backtests?page=${page}&perPage=${perPage}`,
-    fetcher
+    paginatedFetcher<BacktestRun>
   );
 }
 

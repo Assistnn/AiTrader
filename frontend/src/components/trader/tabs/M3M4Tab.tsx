@@ -20,9 +20,9 @@ interface M3M4TabProps {
 }
 
 const modeOptions = [
-  { value: "rule", label: "Rule" },
-  { value: "aiAssist", label: "AI Assist" },
-  { value: "aiFull", label: "AI Full" },
+  { value: "rule", label: "ルール" },
+  { value: "aiAssist", label: "AIアシスト" },
+  { value: "aiFull", label: "AIフル" },
 ];
 
 export function M3M4Tab({ m3, m4, onM3Change, onM4Change }: M3M4TabProps) {
@@ -32,7 +32,7 @@ export function M3M4Tab({ m3, m4, onM3Change, onM4Change }: M3M4TabProps) {
       <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">M3: Entry Execution</CardTitle>
+            <CardTitle className="text-base">M3: エントリー実行</CardTitle>
             <Switch
               checked={m3.enabled}
               onCheckedChange={(v) => onM3Change("enabled", v)}
@@ -42,18 +42,18 @@ export function M3M4Tab({ m3, m4, onM3Change, onM4Change }: M3M4TabProps) {
         <CardContent className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-xs font-medium">Entry Type</label>
+              <label className="text-xs font-medium">エントリー方式</label>
               <Select
                 value={(m3.params.entryType as string) || "market"}
                 options={[
-                  { value: "market", label: "Market" },
-                  { value: "limit", label: "Limit" },
+                  { value: "market", label: "成行" },
+                  { value: "limit", label: "指値" },
                 ]}
                 onChange={(e) => onM3Change("params.entryType", e.target.value)}
               />
             </div>
             <div>
-              <label className="text-xs font-medium">Mode</label>
+              <label className="text-xs font-medium">モード</label>
               <Select
                 value={m3.mode}
                 options={modeOptions}
@@ -63,18 +63,18 @@ export function M3M4Tab({ m3, m4, onM3Change, onM4Change }: M3M4TabProps) {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-xs font-medium">TP/SL Method</label>
+              <label className="text-xs font-medium">TP/SL 方式</label>
               <Select
                 value={(m3.params.tpSlMode as string) || "fixedPips"}
                 options={[
-                  { value: "fixedPips", label: "Fixed Pips" },
-                  { value: "atr", label: "ATR-based" },
+                  { value: "fixedPips", label: "固定pips" },
+                  { value: "atr", label: "ATRベース" },
                 ]}
                 onChange={(e) => onM3Change("params.tpSlMode", e.target.value)}
               />
             </div>
             <div>
-              <label className="text-xs font-medium">Risk %</label>
+              <label className="text-xs font-medium">リスク%</label>
               <Input
                 type="number"
                 min={0.1}
@@ -94,7 +94,7 @@ export function M3M4Tab({ m3, m4, onM3Change, onM4Change }: M3M4TabProps) {
       <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">M4: Exit Management</CardTitle>
+            <CardTitle className="text-base">M4: 退出管理</CardTitle>
             <Switch
               checked={m4.enabled}
               onCheckedChange={(v) => onM4Change("enabled", v)}
@@ -103,12 +103,12 @@ export function M3M4Tab({ m3, m4, onM3Change, onM4Change }: M3M4TabProps) {
         </CardHeader>
         <CardContent className="space-y-3">
           <div>
-            <label className="text-xs font-medium">Management Mode</label>
+            <label className="text-xs font-medium">管理モード</label>
             <Select
               value={(m4.params.managementMode as string) || "passive"}
               options={[
-                { value: "passive", label: "Passive (TP/SL only)" },
-                { value: "active", label: "Active (trailing, BE, partial)" },
+                { value: "passive", label: "パッシブ（TP/SLのみ）" },
+                { value: "active", label: "アクティブ（トレーリング、BE、部分決済）" },
               ]}
               onChange={(e) =>
                 onM4Change("params.managementMode", e.target.value)
@@ -121,26 +121,26 @@ export function M3M4Tab({ m3, m4, onM3Change, onM4Change }: M3M4TabProps) {
                 checked={(m4.params.breakEven as boolean) ?? false}
                 onCheckedChange={(v) => onM4Change("params.breakEven", v)}
               />
-              Break Even
+              ブレイクイーブン
             </label>
             <label className="flex items-center gap-2 text-sm">
               <Switch
                 checked={(m4.params.trailingStop as boolean) ?? false}
                 onCheckedChange={(v) => onM4Change("params.trailingStop", v)}
               />
-              Trailing Stop
+              トレーリングストップ
             </label>
             <label className="flex items-center gap-2 text-sm">
               <Switch
                 checked={(m4.params.partialClose as boolean) ?? false}
                 onCheckedChange={(v) => onM4Change("params.partialClose", v)}
               />
-              Partial Close
+              部分決済
             </label>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-xs font-medium">Max Hold Time (min)</label>
+              <label className="text-xs font-medium">最大保有時間（分）</label>
               <Input
                 type="number"
                 min={0}
@@ -149,10 +149,10 @@ export function M3M4Tab({ m3, m4, onM3Change, onM4Change }: M3M4TabProps) {
                   onM4Change("params.maxHoldTimeMin", Number(e.target.value))
                 }
               />
-              <p className="mt-0.5 text-xs text-muted-foreground">0 = disabled</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">0 = 無制限</p>
             </div>
             <div>
-              <label className="text-xs font-medium">Mode</label>
+              <label className="text-xs font-medium">モード</label>
               <Select
                 value={m4.mode}
                 options={modeOptions}

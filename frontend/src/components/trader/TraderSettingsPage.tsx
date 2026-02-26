@@ -7,11 +7,15 @@ import { BasicInfoTab } from "@/components/trader/tabs/BasicInfoTab";
 import { M1M2Tab } from "@/components/trader/tabs/M1M2Tab";
 import { M3M4Tab } from "@/components/trader/tabs/M3M4Tab";
 import { MXTab } from "@/components/trader/tabs/MXTab";
+import { SafeguardTab } from "@/components/trader/tabs/SafeguardTab";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
+import { Plus, Trash2 } from "lucide-react";
 import { useTraders } from "@/hooks/useDashboard";
 import type { Trader } from "@/types/api";
 import { apiClient } from "@/lib/api";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 
 const defaultStageConfig = {
   enabled: true,
@@ -38,6 +42,16 @@ export function TraderSettingsPage() {
   });
   const [mx, setMX] = useState({ ...defaultMX });
   const [saving, setSaving] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [createForm, setCreateForm] = useState({
+    traderName: "",
+    tradeType: "fx",
+    symbols: "USD_JPY",
+    capitalJpy: 1000000,
+    orderUnitLots: 1,
+  });
 
   const handleSelect = (trader: Trader) => {
     setSelected(trader);
@@ -99,6 +113,48 @@ export function TraderSettingsPage() {
     }
   };
 
+  const handleCreate = async () => {
+    if (!createForm.traderName) return;
+    setCreating(true);
+    try {
+      await apiClient.post("/api/v1/traders", {
+        traderName: createForm.traderName,
+        tradeType: createForm.tradeType,
+        symbols: createForm.symbols.split(",").map((s) => s.trim()),
+        capitalJpy: createForm.capitalJpy,
+        orderUnitLots: createForm.orderUnitLots,
+      });
+      setCreateForm({
+        traderName: "",
+        tradeType: "fx",
+        symbols: "USD_JPY",
+        capitalJpy: 1000000,
+        orderUnitLots: 1,
+      });
+      setShowCreate(false);
+      await mutate();
+    } catch {
+      // Error handled by apiClient
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!selected) return;
+    if (!window.confirm(`トレーダー「${selected.traderName}」を削除しますか？`)) return;
+    setDeleting(true);
+    try {
+      await apiClient.del(`/api/v1/traders/${selected.id}`);
+      setSelected(null);
+      await mutate();
+    } catch {
+      // Error handled by apiClient
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const merged = selected ? { ...selected, ...draft } : null;
 
   return (
@@ -106,34 +162,125 @@ export function TraderSettingsPage() {
       <Header />
       <div className="flex flex-1">
         {/* Left pane: trader list */}
-        <aside className="w-64 border-r p-4">
+        <aside className="w-72 border-r p-4">
           <TraderList
             traders={traders || []}
             activeId={selected?.id ?? null}
             onSelect={handleSelect}
           />
+          <button
+            onClick={() => setShowCreate(!showCreate)}
+            className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-muted-foreground/30 py-2 text-sm text-muted-foreground hover:border-primary hover:text-primary"
+          >
+            <Plus className="h-4 w-4" />
+            新規トレーダー追加
+          </button>
+
+          {/* Create trader form */}
+          {showCreate && (
+            <div className="mt-3 space-y-2 rounded-lg border bg-card p-3">
+              <div>
+                <label className="text-xs font-medium">名前</label>
+                <Input
+                  value={createForm.traderName}
+                  onChange={(e) =>
+                    setCreateForm((f) => ({ ...f, traderName: e.target.value }))
+                  }
+                  placeholder="トレーダー名"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium">取引タイプ</label>
+                <Select
+                  value={createForm.tradeType}
+                  options={[
+                    { value: "fx", label: "FX" },
+                    { value: "crypto", label: "仮想通貨" },
+                  ]}
+                  onChange={(e) =>
+                    setCreateForm((f) => ({ ...f, tradeType: e.target.value }))
+                  }
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium">通貨ペア</label>
+                <Input
+                  value={createForm.symbols}
+                  onChange={(e) =>
+                    setCreateForm((f) => ({ ...f, symbols: e.target.value }))
+                  }
+                  placeholder="USD_JPY,EUR_JPY"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium">資金(円)</label>
+                <Input
+                  type="number"
+                  value={createForm.capitalJpy}
+                  onChange={(e) =>
+                    setCreateForm((f) => ({
+                      ...f,
+                      capitalJpy: Number(e.target.value),
+                    }))
+                  }
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium">注文ロット</label>
+                <Input
+                  type="number"
+                  value={createForm.orderUnitLots}
+                  onChange={(e) =>
+                    setCreateForm((f) => ({
+                      ...f,
+                      orderUnitLots: Number(e.target.value),
+                    }))
+                  }
+                />
+              </div>
+              <Button
+                className="w-full"
+                onClick={handleCreate}
+                disabled={creating || !createForm.traderName}
+              >
+                {creating ? "作成中..." : "作成"}
+              </Button>
+            </div>
+          )}
         </aside>
 
         {/* Right pane: settings tabs */}
-        <main className="flex-1 p-4">
+        <main className="flex-1 p-6">
           {!merged ? (
             <p className="text-center text-muted-foreground">
-              Select a trader to edit settings
+              左のリストからトレーダーを選択してください
             </p>
           ) : (
             <div className="max-w-[900px]">
               <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-lg font-semibold">{merged.name}</h2>
-                <Button onClick={handleSave} disabled={saving}>
-                  {saving ? "Saving..." : "Save"}
-                </Button>
+                <h2 className="text-lg font-semibold">{merged.traderName}</h2>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={handleDelete}
+                    disabled={deleting}
+                    className="text-destructive hover:bg-destructive/10"
+                  >
+                    <Trash2 className="mr-1.5 h-4 w-4" />
+                    {deleting ? "削除中..." : "削除"}
+                  </Button>
+                  <Button onClick={handleSave} disabled={saving}>
+                    {saving ? "保存中..." : "保存"}
+                  </Button>
+                </div>
               </div>
               <Tabs defaultValue="basic">
                 <TabsList>
-                  <TabsTrigger value="basic">Basic</TabsTrigger>
+                  <TabsTrigger value="basic">基本情報</TabsTrigger>
                   <TabsTrigger value="m1m2">M1-M2</TabsTrigger>
                   <TabsTrigger value="m3m4">M3-M4</TabsTrigger>
                   <TabsTrigger value="mx">MX</TabsTrigger>
+                  <TabsTrigger value="safeguard">セーフガード</TabsTrigger>
                 </TabsList>
                 <TabsContent value="basic">
                   <BasicInfoTab trader={merged as Trader} onChange={handleFieldChange} />
@@ -156,6 +303,9 @@ export function TraderSettingsPage() {
                 </TabsContent>
                 <TabsContent value="mx">
                   <MXTab mx={mx} onChange={handleMXChange} />
+                </TabsContent>
+                <TabsContent value="safeguard">
+                  <SafeguardTab traderId={merged.id} />
                 </TabsContent>
               </Tabs>
             </div>

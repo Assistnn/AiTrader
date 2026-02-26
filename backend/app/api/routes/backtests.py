@@ -9,6 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
+from app.models.user import User
 from app.schemas.backtest import (
     BacktestCreateRequest,
     BacktestCreateResponse,
@@ -19,21 +20,18 @@ from app.schemas.backtest import (
 )
 from app.services.backtest.backtest_service import BacktestService
 from app.services.backtest.backtest_types import BacktestConfig
+from app.api.deps import get_current_user
+from app.api.response import ok, paginated
 
 router = APIRouter(prefix="/api/v1/backtests", tags=["backtests"])
 
 
-def _get_user_id() -> int:
-    """簡易: 認証済みユーザーID取得（Phase 3 で JWT Depends に置換）."""
-    return 1
-
-
-@router.post("", response_model=BacktestCreateResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("", status_code=status.HTTP_202_ACCEPTED)
 async def create_backtest(
     req: BacktestCreateRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    user_id: int = Depends(_get_user_id),
+    user: User = Depends(get_current_user),
 ):
     """バックテスト実行開始. バックグラウンドタスクで非同期実行."""
     config = BacktestConfig(
@@ -42,27 +40,23 @@ async def create_backtest(
         start_date=req.start_date,
         end_date=req.end_date,
     )
-    service = BacktestService(db)
-
-    # 同期的に run 作成だけ先に行い、実行はバックグラウンドに委譲
     from app.services.backtest.db_recorder import BacktestDbRecorder
     from dataclasses import asdict
 
     recorder = BacktestDbRecorder(db)
     run_id = await recorder.create_run(
-        user_id=user_id,
+        user_id=user.id,
         trader_id=req.trader_id,
         config=config,
         config_snapshot=asdict(config),
     )
     await db.commit()
 
-    # Background execution
     background_tasks.add_task(
-        _run_backtest_bg, run_id, user_id, req.trader_id, config,
+        _run_backtest_bg, run_id, user.id, req.trader_id, config,
     )
 
-    return BacktestCreateResponse(backtest_id=run_id, status="pending")
+    return ok(BacktestCreateResponse(backtest_id=run_id, status="pending"))
 
 
 async def _run_backtest_bg(
@@ -84,17 +78,18 @@ async def _run_backtest_bg(
             await db.rollback()
 
 
-@router.get("", response_model=list[BacktestListItem])
+@router.get("")
 async def list_backtests(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100, alias="perPage"),
     db: AsyncSession = Depends(get_db),
-    user_id: int = Depends(_get_user_id),
+    user: User = Depends(get_current_user),
 ):
     """バックテスト一覧取得."""
     service = BacktestService(db)
-    runs, _ = await service.list_runs(user_id, page, per_page)
-    return [
+    runs, total = await service.list_runs(user.id, page, per_page)
+
+    items = [
         BacktestListItem(
             backtest_id=r.id,
             trader_id=r.trader_id,
@@ -111,16 +106,18 @@ async def list_backtests(
         for r in runs
     ]
 
+    return paginated(items, page, per_page, total)
 
-@router.get("/{backtest_id}", response_model=BacktestDetailResponse)
+
+@router.get("/{backtest_id}")
 async def get_backtest(
     backtest_id: int,
     db: AsyncSession = Depends(get_db),
-    user_id: int = Depends(_get_user_id),
+    user: User = Depends(get_current_user),
 ):
     """バックテスト詳細取得."""
     service = BacktestService(db)
-    run = await service.get_run(backtest_id, user_id)
+    run = await service.get_run(backtest_id, user.id)
     if run is None:
         raise HTTPException(status_code=404, detail="Backtest not found")
 
@@ -136,7 +133,7 @@ async def get_backtest(
             avg_rr_ratio=float(run.avg_rr_ratio) if run.avg_rr_ratio else None,
         )
 
-    return BacktestDetailResponse(
+    return ok(BacktestDetailResponse(
         backtest_id=run.id,
         trader_id=run.trader_id,
         status=run.status,
@@ -150,24 +147,23 @@ async def get_backtest(
         completed_at=run.completed_at,
         error_message=run.error_message,
         created_at=run.created_at,
-    )
+    ))
 
 
-@router.get("/{backtest_id}/trades", response_model=list[BacktestTradeResponse])
+@router.get("/{backtest_id}/trades")
 async def get_backtest_trades(
     backtest_id: int,
     db: AsyncSession = Depends(get_db),
-    user_id: int = Depends(_get_user_id),
+    user: User = Depends(get_current_user),
 ):
     """バックテスト内トレード一覧."""
     service = BacktestService(db)
-    # Verify ownership
-    run = await service.get_run(backtest_id, user_id)
+    run = await service.get_run(backtest_id, user.id)
     if run is None:
         raise HTTPException(status_code=404, detail="Backtest not found")
 
-    trades = await service.get_trades(backtest_id, user_id)
-    return [
+    trades = await service.get_trades(backtest_id, user.id)
+    return ok([
         BacktestTradeResponse(
             trade_id=t.id,
             pair=t.pair,
@@ -183,18 +179,18 @@ async def get_backtest_trades(
             exit_timestamp=t.exit_timestamp,
         )
         for t in trades
-    ]
+    ])
 
 
 @router.delete("/{backtest_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_backtest(
     backtest_id: int,
     db: AsyncSession = Depends(get_db),
-    user_id: int = Depends(_get_user_id),
+    user: User = Depends(get_current_user),
 ):
     """バックテスト削除."""
     service = BacktestService(db)
-    deleted = await service.delete_run(backtest_id, user_id)
+    deleted = await service.delete_run(backtest_id, user.id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Backtest not found")
     await db.commit()

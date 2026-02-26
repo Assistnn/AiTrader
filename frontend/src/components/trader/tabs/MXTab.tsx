@@ -19,17 +19,17 @@ export function MXTab({ mx, onChange }: MXTabProps) {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-base">MX: Integrated Judgment</CardTitle>
+        <CardTitle className="text-base">MX: 統合判定</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <div>
-          <label className="text-xs font-medium">Evaluation Mode</label>
+          <label className="text-xs font-medium">評価方式</label>
           <Select
             value={mx.evaluationMode}
             options={[
-              { value: "all", label: "All stages must pass" },
-              { value: "dir+setup", label: "Direction + Setup" },
-              { value: "score", label: "Score-based" },
+              { value: "all", label: "全ステージ通過必須" },
+              { value: "dir+setup", label: "方向 + セットアップ" },
+              { value: "score", label: "スコアベース" },
             ]}
             onChange={(e) => onChange("evaluationMode", e.target.value)}
           />
@@ -38,11 +38,11 @@ export function MXTab({ mx, onChange }: MXTabProps) {
         {mx.evaluationMode === "score" && (
           <>
             <div>
-              <label className="text-xs font-medium">Score Weights</label>
+              <label className="text-xs font-medium">スコア重み</label>
               <div className="mt-2 grid grid-cols-3 gap-3">
                 <div>
                   <label className="text-xs text-muted-foreground">
-                    Direction
+                    方向
                   </label>
                   <Input
                     type="number"
@@ -56,7 +56,7 @@ export function MXTab({ mx, onChange }: MXTabProps) {
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-muted-foreground">Setup</label>
+                  <label className="text-xs text-muted-foreground">セットアップ</label>
                   <Input
                     type="number"
                     min={0}
@@ -70,7 +70,7 @@ export function MXTab({ mx, onChange }: MXTabProps) {
                 </div>
                 <div>
                   <label className="text-xs text-muted-foreground">
-                    Execution
+                    実行
                   </label>
                   <Input
                     type="number"
@@ -86,7 +86,7 @@ export function MXTab({ mx, onChange }: MXTabProps) {
               </div>
             </div>
             <div>
-              <label className="text-xs font-medium">Score Threshold</label>
+              <label className="text-xs font-medium">スコア閾値</label>
               <Input
                 type="number"
                 min={0}

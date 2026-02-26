@@ -6,7 +6,7 @@ Reference: 08_API仕様 Section 3-1, 11_セキュリティ Section 2
 
 from __future__ import annotations
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -21,6 +21,7 @@ from app.services.auth.jwt_handler import (
     decode_token,
     ACCESS_TOKEN_EXPIRE_MINUTES,
 )
+from app.api.response import ok
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
@@ -62,7 +63,7 @@ class RegisterResponse(BaseModel):
 # --- Endpoints ---
 
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login")
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     """
     Authenticate user and issue JWT tokens.
@@ -83,14 +84,14 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     access_token = create_access_token(user.id)
     refresh_token = create_refresh_token(user.id)
 
-    return LoginResponse(
+    return ok(LoginResponse(
         accessToken=access_token,
         refreshToken=refresh_token,
-        expiresIn=ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # seconds
-    )
+        expiresIn=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    ))
 
 
-@router.post("/refresh", response_model=RefreshResponse)
+@router.post("/refresh")
 async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
     """
     Refresh access token using a valid refresh token.
@@ -123,10 +124,10 @@ async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
 
     access_token = create_access_token(user.id)
 
-    return RefreshResponse(
+    return ok(RefreshResponse(
         accessToken=access_token,
         expiresIn=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-    )
+    ))
 
 
 @router.post("/logout")
@@ -135,21 +136,15 @@ async def logout():
     Logout (client-side token discard).
 
     Reference: 08_API仕様 POST /api/v1/auth/logout
-    Note: JWT is stateless; logout is handled client-side by discarding tokens.
-    Server-side token blacklisting can be added in a future phase if needed.
     """
     return {"status": "ok"}
 
 
-@router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     """
     Register a new user account.
-
-    Note: This endpoint is for initial setup. Access control
-    (invite-only, admin approval) can be added later.
     """
-    # Validate password strength
     is_valid, error_msg = validate_password_strength(body.password)
     if not is_valid:
         raise HTTPException(
@@ -157,7 +152,6 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
             detail=error_msg,
         )
 
-    # Check duplicate email
     result = await db.execute(select(User).where(User.email == body.email))
     if result.scalar_one_or_none() is not None:
         raise HTTPException(
@@ -174,4 +168,4 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     await db.flush()
     await db.refresh(user)
 
-    return RegisterResponse(userId=user.id, email=user.email)
+    return ok(RegisterResponse(userId=user.id, email=user.email))

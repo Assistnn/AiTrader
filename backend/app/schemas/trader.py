@@ -29,6 +29,25 @@ class TraderCreateRequest(BaseModel):
     notify_on_target: bool = Field(True, alias="notifyOnTarget")
 
 
+class TraderUpdateRequest(BaseModel):
+    """PUT /api/v1/traders/{traderId} リクエスト."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    trader_name: str | None = Field(None, alias="traderName")
+    trade_type: str | None = Field(None, alias="tradeType")
+    symbols: list[str] | None = None
+    capital_jpy: float | None = Field(None, alias="capitalJpy")
+    order_unit_lots: float | None = Field(None, alias="orderUnitLots")
+    strategy_text: str | None = Field(None, alias="strategyText")
+    notify_email: str | None = Field(None, alias="notifyEmail")
+    notify_on_entry: bool | None = Field(None, alias="notifyOnEntry")
+    notify_on_stop: bool | None = Field(None, alias="notifyOnStop")
+    notify_on_error: bool | None = Field(None, alias="notifyOnError")
+    notify_on_exit: bool | None = Field(None, alias="notifyOnExit")
+    notify_on_target: bool | None = Field(None, alias="notifyOnTarget")
+
+
 class TraderResponse(BaseModel):
     """GET /api/v1/traders/{traderId} レスポンス."""
 

@@ -10,24 +10,22 @@ import io
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
+from app.models.user import User
 from app.models.trade_history import TradeHistory
 from app.models.pipeline_log import PipelineLog
 from app.models.safeguard_log import SafeguardLog
 from app.schemas.history import TradeHistoryItem, TradeHistoryDetail
+from app.api.deps import get_current_user
+from app.api.response import ok, paginated
 
 router = APIRouter(prefix="/api/v1/history", tags=["history"])
 
 
-def _get_user_id() -> int:
-    """簡易: 認証済みユーザーID取得."""
-    return 1
-
-
-@router.get("", response_model=list[TradeHistoryItem])
+@router.get("")
 async def list_trade_history(
     trader_id: int | None = Query(None, alias="traderId"),
     pair: str | None = None,
@@ -36,23 +34,28 @@ async def list_trade_history(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100, alias="perPage"),
     db: AsyncSession = Depends(get_db),
-    user_id: int = Depends(_get_user_id),
+    user: User = Depends(get_current_user),
 ):
     """取引履歴一覧（ページネーション）."""
-    q = select(TradeHistory).where(TradeHistory.user_id == user_id)
+    base = select(TradeHistory).where(TradeHistory.user_id == user.id)
 
     if trader_id is not None:
-        q = q.where(TradeHistory.trader_id == trader_id)
+        base = base.where(TradeHistory.trader_id == trader_id)
     if pair is not None:
-        q = q.where(TradeHistory.pair == pair)
+        base = base.where(TradeHistory.pair == pair)
 
-    q = q.order_by(TradeHistory.opened_at.desc())
+    # Total count
+    count_q = select(func.count()).select_from(base.subquery())
+    total = (await db.execute(count_q)).scalar() or 0
+
+    # Paginated data
+    q = base.order_by(TradeHistory.opened_at.desc())
     q = q.offset((page - 1) * per_page).limit(per_page)
 
     result = await db.execute(q)
     trades = result.scalars().all()
 
-    return [
+    items = [
         TradeHistoryItem(
             id=t.id,
             trader_id=t.trader_id,
@@ -71,15 +74,49 @@ async def list_trade_history(
         for t in trades
     ]
 
+    return paginated(items, page, per_page, total)
+
+
+@router.get("/chart-data")
+async def get_chart_data(
+    trader_id: int | None = Query(None, alias="traderId"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """チャート用損益データ."""
+    q = select(TradeHistory).where(
+        TradeHistory.user_id == user.id,
+        TradeHistory.closed_at.isnot(None),
+    )
+    if trader_id is not None:
+        q = q.where(TradeHistory.trader_id == trader_id)
+    q = q.order_by(TradeHistory.closed_at.asc())
+
+    result = await db.execute(q)
+    trades = result.scalars().all()
+
+    cumulative = 0.0
+    data_points = []
+    for t in trades:
+        pnl = float(t.realized_pnl) if t.realized_pnl else 0
+        cumulative += pnl
+        data_points.append({
+            "timestamp": t.closed_at.isoformat() if t.closed_at else None,
+            "pnl": pnl,
+            "cumulativePnl": round(cumulative, 2),
+        })
+
+    return ok(data_points)
+
 
 @router.get("/export/csv")
 async def export_csv(
     trader_id: int | None = Query(None, alias="traderId"),
     db: AsyncSession = Depends(get_db),
-    user_id: int = Depends(_get_user_id),
+    user: User = Depends(get_current_user),
 ):
     """CSV出力."""
-    q = select(TradeHistory).where(TradeHistory.user_id == user_id)
+    q = select(TradeHistory).where(TradeHistory.user_id == user.id)
     if trader_id is not None:
         q = q.where(TradeHistory.trader_id == trader_id)
     q = q.order_by(TradeHistory.opened_at.desc())
@@ -116,15 +153,15 @@ async def export_csv(
     )
 
 
-@router.get("/{trade_id}", response_model=TradeHistoryDetail)
+@router.get("/{trade_id}")
 async def get_trade_detail(
     trade_id: int,
     db: AsyncSession = Depends(get_db),
-    user_id: int = Depends(_get_user_id),
+    user: User = Depends(get_current_user),
 ):
     """取引詳細（4段階判定含む）."""
     q = select(TradeHistory).where(
-        TradeHistory.id == trade_id, TradeHistory.user_id == user_id
+        TradeHistory.id == trade_id, TradeHistory.user_id == user.id
     )
     result = await db.execute(q)
     trade = result.scalar_one_or_none()
@@ -149,7 +186,7 @@ async def get_trade_detail(
                 "elapsedMs": float(log.elapsed_ms) if log.elapsed_ms else None,
             })
 
-    # Safeguard logs (linked by trader_id + timestamp proximity)
+    # Safeguard logs
     sg_logs: list[dict] = []
     if trade.opened_at:
         sq = (
@@ -181,8 +218,8 @@ async def get_trade_detail(
         closed_at=trade.closed_at,
     )
 
-    return TradeHistoryDetail(
+    return ok(TradeHistoryDetail(
         trade=trade_item,
         pipeline_logs=pl_logs,
         safeguard_logs=sg_logs,
-    )
+    ))

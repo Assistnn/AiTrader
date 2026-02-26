@@ -5,35 +5,57 @@ export interface ApiResponse<T> {
   error?: { code: string; message: string };
 }
 
-/** Pagination response. */
-export interface PaginatedResponse<T> {
-  items: T[];
-  total: number;
+/** Pagination metadata from backend. Reference: 08_API仕様 Section 2-4 */
+export interface Pagination {
   page: number;
   perPage: number;
+  totalItems: number;
   totalPages: number;
 }
 
-/** Trader summary (lowerCamelCase). Reference: 08_API仕様 */
-export interface Trader {
-  id: number;
-  name: string;
-  tradeType: "fx" | "crypto";
-  pair: string;
-  status: "running" | "stopped" | "error";
-  capital: number;
-  lotSize: number;
-  strategyText: string;
-  pipelineState?: PipelineState;
-  guardState?: GuardStateIndicator;
-  dailyPnl: number;
-  monthlyPnl: number;
+/** Paginated response from backend. */
+export interface PaginatedResponse<T> {
+  data: T[];
+  pagination: Pagination;
 }
 
-export interface PipelineState {
-  m1Trend: "UP" | "DOWN" | "NEUTRAL";
-  m2Setup: string;
-  lastExecution: string;
+/** Trader detail (GET /api/v1/traders/{id}). Matches backend TraderResponse. */
+export interface Trader {
+  id: number;
+  traderName: string;
+  tradeType: string;
+  symbols: string[];
+  capitalJpy: number;
+  orderUnitLots: number;
+  strategyText: string | null;
+  status: "running" | "stopped" | "error" | "halted";
+  createdAt: string;
+}
+
+/** Trader list item (GET /api/v1/traders). Matches backend TraderListItem. */
+export interface TraderListItem {
+  id: number;
+  traderName: string;
+  tradeType: string;
+  status: string;
+  capitalJpy: number;
+  createdAt: string;
+}
+
+/** Trader summary in dashboard. Matches backend TraderSummary. */
+export interface TraderSummary {
+  traderId: number;
+  traderName: string;
+  status: string;
+  pnlToday: number;
+  openPositions: number;
+  pipelineState?: PipelineStateResponse | null;
+}
+
+export interface PipelineStateResponse {
+  lastM1?: Record<string, unknown> | null;
+  lastM2?: Record<string, unknown> | null;
+  guardState?: Record<string, unknown> | null;
 }
 
 export interface GuardStateIndicator {
@@ -41,13 +63,13 @@ export interface GuardStateIndicator {
   blockingGuards: string[];
 }
 
-/** Dashboard summary. Reference: 01_画面仕様 */
+/** Dashboard summary. Matches backend DashboardSummaryResponse. */
 export interface DashboardSummary {
-  traders: Trader[];
-  totalDailyPnl: number;
-  totalMonthlyPnl: number;
-  activePositions: number;
-  prices: Record<string, PriceQuote>;
+  totalPnlToday: number;
+  totalPnlMonth: number;
+  activeTraders: number;
+  openPositions: number;
+  traders: TraderSummary[];
 }
 
 export interface PriceQuote {
@@ -57,22 +79,21 @@ export interface PriceQuote {
   timestamp: string;
 }
 
-/** Trade history record. */
+/** Trade history record. Matches backend TradeHistoryItem. */
 export interface TradeRecord {
   id: number;
   traderId: number;
-  traderName: string;
   pair: string;
   side: "BUY" | "SELL";
-  amount: number;
-  entryPrice: number;
-  exitPrice: number;
-  entryTimestamp: string;
-  exitTimestamp: string;
-  realizedPnl: number;
-  realizedPnlPips: number;
-  rrRatio: number;
-  exitReason: string;
+  amount: number | null;
+  entryPrice: number | null;
+  exitPrice: number | null;
+  realizedPnl: number | null;
+  realizedPnlPips: number | null;
+  rrRatio: number | null;
+  exitReason: string | null;
+  openedAt: string;
+  closedAt: string | null;
   pipelineLogs?: PipelineLogSummary;
 }
 
@@ -122,6 +143,73 @@ export interface ModelStageConfig {
   mode: "rule" | "aiAssist" | "aiFull";
   timeframes: string[];
   params: Record<string, unknown>;
+}
+
+/** Exchange API config. Reference: 08_API仕様 Section 3-14 */
+export interface ExchangeConfig {
+  id: number;
+  exchangeType: string;
+  apiKeyMasked: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** AI provider config. Reference: 08_API仕様 Section 3-14 */
+export interface AiConfig {
+  id: number;
+  provider: string;
+  apiKeyMasked: string;
+  defaultModel: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Account info. Reference: 08_API仕様 Section 3-2 */
+export interface AccountInfo {
+  id: number;
+  email: string;
+  displayName: string | null;
+  isActive: boolean;
+  createdAt: string;
+}
+
+/** Cost config (read-only, server-configured). Reference: 14_コスト管理 */
+export interface CostConfig {
+  dailyTokenLimit: number;
+  rateLimitPerTrader: number;
+  rateLimitGlobal: number;
+  warningThresholdPct: number;
+}
+
+/** SMTP config. Reference: 08_API仕様 Section 3-9 */
+export interface SmtpConfig {
+  host: string | null;
+  port: number | null;
+  username: string | null;
+  useTls: boolean;
+  fromAddress: string | null;
+}
+
+/** Notification email item. Reference: 08_API仕様 Section 3-9 */
+export interface NotificationEmailItem {
+  id: number;
+  email: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+/** Daily notification config. Reference: 08_API仕様 Section 3-9 */
+export interface DailyNotificationConfig {
+  id: number;
+  enabled: boolean;
+  sendTimeUtc: string | null;
+  includePnl: boolean;
+  includeTrades: boolean;
+  includeGuards: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** WebSocket message types. Reference: 08_API仕様 */

@@ -10,24 +10,35 @@ interface TraderListProps {
   onSelect: (trader: Trader) => void;
 }
 
+const statusLabels: Record<string, string> = {
+  running: "稼働中",
+  stopped: "停止中",
+  error: "エラー",
+};
+
 export function TraderList({ traders, activeId, onSelect }: TraderListProps) {
   return (
     <div className="space-y-1">
       <h3 className="mb-2 text-sm font-medium text-muted-foreground">
-        Traders
+        トレーダー一覧
       </h3>
       {traders.map((t) => (
         <button
           key={t.id}
           onClick={() => onSelect(t)}
           className={cn(
-            "flex w-full items-center justify-between rounded-md px-3 py-2 text-sm transition-colors",
+            "flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors",
             activeId === t.id
-              ? "bg-accent text-accent-foreground"
+              ? "border border-blue-500 bg-blue-50 text-foreground dark:bg-blue-950/50"
               : "hover:bg-accent/50"
           )}
         >
-          <span>{t.name}</span>
+          <div className="text-left">
+            <span className="font-medium">{t.traderName}</span>
+            <p className="text-xs text-muted-foreground">
+              {t.symbols?.[0]?.replace("_", "/") || t.tradeType}
+            </p>
+          </div>
           <Badge
             variant={
               t.status === "running"
@@ -37,7 +48,7 @@ export function TraderList({ traders, activeId, onSelect }: TraderListProps) {
                 : "secondary"
             }
           >
-            {t.status}
+            {statusLabels[t.status] || t.status}
           </Badge>
         </button>
       ))}

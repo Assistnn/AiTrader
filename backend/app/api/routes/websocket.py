@@ -1,9 +1,9 @@
 """
 WebSocket endpoint for real-time data channels.
 
-Reference: 08_API仕様.md Section WebSocket, 10_フロントエンドアーキテクチャ
+Reference: 08_API仕様.md Section 4, 10_フロントエンドアーキテクチャ
 
-Channels:
+Channels (08_API仕様 Section 4-2):
   - prices: Real-time price updates (bid/ask)
   - trader_updates: Trader state changes (position opened/closed, etc.)
   - alerts: Safeguard triggers, pipeline errors
@@ -13,7 +13,9 @@ Channels:
 import asyncio
 import json
 import logging
-from typing import Dict, Set
+import random
+from datetime import datetime, timezone
+from typing import Any, Dict, Set
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -27,31 +29,81 @@ class ConnectionManager:
 
     def __init__(self) -> None:
         self.active_connections: Set[WebSocket] = set()
+        self._subscriptions: Dict[WebSocket, Dict[str, Any]] = {}
+        self._mock_task: asyncio.Task | None = None
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
         self.active_connections.add(websocket)
+        self._subscriptions[websocket] = {}
         logger.info(
             "WebSocket connected. Total: %d", len(self.active_connections)
         )
+        # Start mock price feed if not running
+        if self._mock_task is None or self._mock_task.done():
+            self._mock_task = asyncio.create_task(self._mock_price_loop())
 
     def disconnect(self, websocket: WebSocket) -> None:
         self.active_connections.discard(websocket)
+        self._subscriptions.pop(websocket, None)
         logger.info(
             "WebSocket disconnected. Total: %d", len(self.active_connections)
         )
+        if not self.active_connections and self._mock_task and not self._mock_task.done():
+            self._mock_task.cancel()
+            self._mock_task = None
+
+    def _handle_subscribe(self, websocket: WebSocket, msg: Dict) -> None:
+        """Handle subscribe action from client."""
+        channel = msg.get("channel")
+        if channel:
+            self._subscriptions.setdefault(websocket, {})[channel] = {
+                "pairs": msg.get("pairs", []),
+                "traderIds": msg.get("traderIds", []),
+            }
+
+    def _handle_unsubscribe(self, websocket: WebSocket, msg: Dict) -> None:
+        """Handle unsubscribe action from client."""
+        channel = msg.get("channel")
+        if channel and websocket in self._subscriptions:
+            self._subscriptions[websocket].pop(channel, None)
 
     async def broadcast(self, channel: str, data: Dict) -> None:
-        """Broadcast a message to all connected clients."""
+        """Broadcast a message to all clients subscribed to the channel."""
         message = json.dumps({"channel": channel, **data})
         disconnected: list[WebSocket] = []
         for connection in self.active_connections:
+            # Check subscription (if subscriptions exist, filter; otherwise broadcast to all)
+            subs = self._subscriptions.get(connection, {})
+            if subs and channel not in subs:
+                continue
             try:
                 await connection.send_text(message)
             except Exception:
                 disconnected.append(connection)
         for ws in disconnected:
             self.active_connections.discard(ws)
+            self._subscriptions.pop(ws, None)
+
+    async def broadcast_to_trader(
+        self, channel: str, trader_id: int, data: Dict
+    ) -> None:
+        """Broadcast to clients subscribed to a specific trader."""
+        message = json.dumps({"channel": channel, "traderId": trader_id, **data})
+        disconnected: list[WebSocket] = []
+        for connection in self.active_connections:
+            subs = self._subscriptions.get(connection, {})
+            ch_sub = subs.get(channel, {})
+            trader_ids = ch_sub.get("traderIds", [])
+            # Send if subscribed to channel with no filter or matching traderId
+            if channel in subs and (not trader_ids or trader_id in trader_ids):
+                try:
+                    await connection.send_text(message)
+                except Exception:
+                    disconnected.append(connection)
+        for ws in disconnected:
+            self.active_connections.discard(ws)
+            self._subscriptions.pop(ws, None)
 
     async def send_to(
         self, websocket: WebSocket, channel: str, data: Dict
@@ -59,6 +111,81 @@ class ConnectionManager:
         """Send a message to a specific client."""
         message = json.dumps({"channel": channel, **data})
         await websocket.send_text(message)
+
+    # --- Broadcast helpers for services ---
+
+    async def send_trader_update(
+        self, trader_id: int, update_type: str, data: Dict
+    ) -> None:
+        """Send trader_updates channel message (08_API仕様 Section 4-2)."""
+        await self.broadcast_to_trader("trader_updates", trader_id, {
+            "type": update_type,
+            "data": data,
+        })
+
+    async def send_alert(
+        self, alert_type: str, data: Dict
+    ) -> None:
+        """Send alerts channel message (08_API仕様 Section 4-2)."""
+        await self.broadcast("alerts", {
+            "type": alert_type,
+            "data": data,
+        })
+
+    async def send_pipeline_status(
+        self, trader_id: int, execution_id: str, stage: str, result: str
+    ) -> None:
+        """Send pipeline_status channel message (08_API仕様 Section 4-2)."""
+        await self.broadcast_to_trader("pipeline_status", trader_id, {
+            "executionId": execution_id,
+            "stage": stage,
+            "result": result,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    async def _mock_price_loop(self) -> None:
+        """Broadcast mock prices every second for development/testing."""
+        prices = {
+            "USD_JPY": {"bid": 150.250, "ask": 150.253},
+            "EUR_JPY": {"bid": 162.500, "ask": 162.505},
+            "GBP_JPY": {"bid": 189.100, "ask": 189.108},
+            "EUR_USD": {"bid": 1.08150, "ask": 1.08155},
+            "BTC_JPY": {"bid": 6550000, "ask": 6551000},
+            "ETH_JPY": {"bid": 345000, "ask": 345200},
+            "XRP_JPY": {"bid": 85.50, "ask": 85.60},
+        }
+        try:
+            while self.active_connections:
+                ts = datetime.now(timezone.utc).isoformat()
+                for pair, p in prices.items():
+                    is_crypto = pair in ("BTC_JPY", "ETH_JPY", "XRP_JPY")
+                    if is_crypto:
+                        delta = random.uniform(-500, 500) if "BTC" in pair else random.uniform(-50, 50)
+                        if "XRP" in pair:
+                            delta = random.uniform(-0.1, 0.1)
+                    else:
+                        delta = random.uniform(-0.05, 0.05)
+                    p["bid"] = round(
+                        p["bid"] + delta,
+                        3 if not is_crypto else 0 if "BTC" in pair or "ETH" in pair else 2,
+                    )
+                    spread = p["ask"] - p["bid"]
+                    p["ask"] = round(
+                        p["bid"] + abs(spread),
+                        3 if not is_crypto else 0 if "BTC" in pair or "ETH" in pair else 2,
+                    )
+
+                    await self.broadcast("prices", {
+                        "pair": pair,
+                        "bid": p["bid"],
+                        "ask": p["ask"],
+                        "timestamp": ts,
+                    })
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Mock price loop error")
 
 
 manager = ConnectionManager()
@@ -69,11 +196,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     await manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive; handle incoming messages (subscriptions, pings)
             data = await websocket.receive_text()
             try:
                 msg = json.loads(data)
-                if msg.get("type") == "ping":
+                action = msg.get("action")
+                if action == "subscribe":
+                    manager._handle_subscribe(websocket, msg)
+                elif action == "unsubscribe":
+                    manager._handle_unsubscribe(websocket, msg)
+                elif msg.get("type") == "ping":
                     await manager.send_to(
                         websocket, "system", {"type": "pong"}
                     )

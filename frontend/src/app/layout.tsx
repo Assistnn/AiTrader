@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
+import { ThemeProvider } from "@/components/common/ThemeProvider";
+import { AuthGuard } from "@/components/common/AuthGuard";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "AI Trading System",
-  description: "FX/Crypto automated trading with 4-stage pipeline",
+  description: "FX/暗号通貨 自動取引システム",
 };
 
 export default function RootLayout({
@@ -12,8 +14,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="ja" className="dark">
-      <body className="min-h-screen antialiased">{children}</body>
+    <html lang="ja" suppressHydrationWarning>
+      <body className="min-h-screen antialiased">
+        <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
+          <AuthGuard>{children}</AuthGuard>
+        </ThemeProvider>
+      </body>
     </html>
   );
 }

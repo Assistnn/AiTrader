@@ -20,18 +20,18 @@ interface M1M2TabProps {
 }
 
 const modeOptions = [
-  { value: "rule", label: "Rule" },
-  { value: "aiAssist", label: "AI Assist" },
-  { value: "aiFull", label: "AI Full" },
+  { value: "rule", label: "ルール" },
+  { value: "aiAssist", label: "AIアシスト" },
+  { value: "aiFull", label: "AIフル" },
 ];
 
 const timeframeOptions = [
-  { value: "M5", label: "M5" },
-  { value: "M15", label: "M15" },
-  { value: "M30", label: "M30" },
-  { value: "H1", label: "H1" },
-  { value: "H4", label: "H4" },
-  { value: "D1", label: "D1" },
+  { value: "M5", label: "5分" },
+  { value: "M15", label: "15分" },
+  { value: "M30", label: "30分" },
+  { value: "H1", label: "1時間" },
+  { value: "H4", label: "4時間" },
+  { value: "D1", label: "日足" },
 ];
 
 const providerOptions = [
@@ -47,7 +47,7 @@ export function M1M2Tab({ m1, m2, onM1Change, onM2Change }: M1M2TabProps) {
       <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">M1: Direction & Regime</CardTitle>
+            <CardTitle className="text-base">M1: 方向判定</CardTitle>
             <Switch
               checked={m1.enabled}
               onCheckedChange={(v) => onM1Change("enabled", v)}
@@ -57,7 +57,7 @@ export function M1M2Tab({ m1, m2, onM1Change, onM2Change }: M1M2TabProps) {
         <CardContent className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-xs font-medium">Timeframe</label>
+              <label className="text-xs font-medium">時間足</label>
               <Select
                 value={m1.timeframe}
                 options={timeframeOptions}
@@ -65,7 +65,7 @@ export function M1M2Tab({ m1, m2, onM1Change, onM2Change }: M1M2TabProps) {
               />
             </div>
             <div>
-              <label className="text-xs font-medium">Mode</label>
+              <label className="text-xs font-medium">モード</label>
               <Select
                 value={m1.mode}
                 options={modeOptions}
@@ -76,7 +76,7 @@ export function M1M2Tab({ m1, m2, onM1Change, onM2Change }: M1M2TabProps) {
           {m1.mode !== "rule" && (
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-xs font-medium">AI Provider</label>
+                <label className="text-xs font-medium">AIプロバイダー</label>
                 <Select
                   value={(m1.params.aiProvider as string) || "openai"}
                   options={providerOptions}
@@ -84,7 +84,7 @@ export function M1M2Tab({ m1, m2, onM1Change, onM2Change }: M1M2TabProps) {
                 />
               </div>
               <div>
-                <label className="text-xs font-medium">Min Confidence</label>
+                <label className="text-xs font-medium">最小信頼度</label>
                 <Input
                   type="number"
                   min={0}
@@ -104,21 +104,21 @@ export function M1M2Tab({ m1, m2, onM1Change, onM2Change }: M1M2TabProps) {
                 checked={(m1.params.trendEnabled as boolean) ?? true}
                 onCheckedChange={(v) => onM1Change("params.trendEnabled", v)}
               />
-              Trend
+              トレンド
             </label>
             <label className="flex items-center gap-2 text-sm">
               <Switch
                 checked={(m1.params.rangeAvoidance as boolean) ?? true}
                 onCheckedChange={(v) => onM1Change("params.rangeAvoidance", v)}
               />
-              Range Avoidance
+              レンジ回避
             </label>
             <label className="flex items-center gap-2 text-sm">
               <Switch
                 checked={(m1.params.volatilityEnabled as boolean) ?? true}
                 onCheckedChange={(v) => onM1Change("params.volatilityEnabled", v)}
               />
-              Volatility
+              ボラティリティ
             </label>
           </div>
         </CardContent>
@@ -128,7 +128,7 @@ export function M1M2Tab({ m1, m2, onM1Change, onM2Change }: M1M2TabProps) {
       <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">M2: Setup Detection</CardTitle>
+            <CardTitle className="text-base">M2: セットアップ検出</CardTitle>
             <Switch
               checked={m2.enabled}
               onCheckedChange={(v) => onM2Change("enabled", v)}
@@ -138,7 +138,7 @@ export function M1M2Tab({ m1, m2, onM1Change, onM2Change }: M1M2TabProps) {
         <CardContent className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-xs font-medium">Timeframe</label>
+              <label className="text-xs font-medium">時間足</label>
               <Select
                 value={m2.timeframe}
                 options={timeframeOptions}
@@ -146,7 +146,7 @@ export function M1M2Tab({ m1, m2, onM1Change, onM2Change }: M1M2TabProps) {
               />
             </div>
             <div>
-              <label className="text-xs font-medium">Mode</label>
+              <label className="text-xs font-medium">モード</label>
               <Select
                 value={m2.mode}
                 options={modeOptions}
@@ -155,20 +155,20 @@ export function M1M2Tab({ m1, m2, onM1Change, onM2Change }: M1M2TabProps) {
             </div>
           </div>
           <div>
-            <label className="text-xs font-medium">Setup Preset</label>
+            <label className="text-xs font-medium">セットアッププリセット</label>
             <Select
               value={(m2.params.setupPreset as string) || "trendFollowing"}
               options={[
-                { value: "trendFollowing", label: "Trend Following" },
-                { value: "meanReversion", label: "Mean Reversion" },
-                { value: "breakout", label: "Breakout" },
-                { value: "custom", label: "Custom" },
+                { value: "trendFollowing", label: "トレンドフォロー" },
+                { value: "meanReversion", label: "平均回帰" },
+                { value: "breakout", label: "ブレイクアウト" },
+                { value: "custom", label: "カスタム" },
               ]}
               onChange={(e) => onM2Change("params.setupPreset", e.target.value)}
             />
           </div>
           <div>
-            <label className="text-xs font-medium">Probability Threshold</label>
+            <label className="text-xs font-medium">確率閾値</label>
             <Input
               type="number"
               min={0}

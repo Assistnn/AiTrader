@@ -10,8 +10,8 @@ interface BasicInfoTabProps {
 }
 
 const tradeTypeOptions = [
-  { value: "fx", label: "FX" },
-  { value: "crypto", label: "Crypto" },
+  { value: "FX", label: "FX" },
+  { value: "crypto", label: "仮想通貨" },
 ];
 
 const fxPairs = [
@@ -28,19 +28,21 @@ const cryptoPairs = [
 ];
 
 export function BasicInfoTab({ trader, onChange }: BasicInfoTabProps) {
-  const pairOptions = trader.tradeType === "fx" ? fxPairs : cryptoPairs;
+  const isFx = trader.tradeType === "FX" || trader.tradeType === "fx";
+  const pairOptions = isFx ? fxPairs : cryptoPairs;
+  const primaryPair = trader.symbols?.[0] || "";
 
   return (
     <div className="space-y-4">
       <div>
-        <label className="text-sm font-medium">Trader Name</label>
+        <label className="text-sm font-medium">トレーダー名</label>
         <Input
-          value={trader.name}
-          onChange={(e) => onChange("name", e.target.value)}
+          value={trader.traderName}
+          onChange={(e) => onChange("traderName", e.target.value)}
         />
       </div>
       <div>
-        <label className="text-sm font-medium">Trade Type</label>
+        <label className="text-sm font-medium">取引タイプ</label>
         <Select
           value={trader.tradeType}
           options={tradeTypeOptions}
@@ -48,40 +50,40 @@ export function BasicInfoTab({ trader, onChange }: BasicInfoTabProps) {
         />
       </div>
       <div>
-        <label className="text-sm font-medium">Pair</label>
+        <label className="text-sm font-medium">通貨ペア</label>
         <Select
-          value={trader.pair}
+          value={primaryPair}
           options={pairOptions}
-          onChange={(e) => onChange("pair", e.target.value)}
+          onChange={(e) => onChange("symbols", [e.target.value])}
         />
       </div>
       <div>
-        <label className="text-sm font-medium">Capital (JPY)</label>
+        <label className="text-sm font-medium">資金 (JPY)</label>
         <Input
           type="number"
-          value={trader.capital}
-          onChange={(e) => onChange("capital", Number(e.target.value))}
+          value={trader.capitalJpy}
+          onChange={(e) => onChange("capitalJpy", Number(e.target.value))}
         />
       </div>
       <div>
-        <label className="text-sm font-medium">Lot Size</label>
+        <label className="text-sm font-medium">ロットサイズ</label>
         <Input
           type="number"
-          value={trader.lotSize}
+          value={trader.orderUnitLots}
           step="0.01"
-          onChange={(e) => onChange("lotSize", Number(e.target.value))}
+          onChange={(e) => onChange("orderUnitLots", Number(e.target.value))}
         />
       </div>
       <div>
-        <label className="text-sm font-medium">Strategy Text</label>
+        <label className="text-sm font-medium">戦略テキスト</label>
         <textarea
           className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          value={trader.strategyText}
+          value={trader.strategyText || ""}
           onChange={(e) => onChange("strategyText", e.target.value)}
           maxLength={2000}
         />
         <p className="mt-1 text-xs text-muted-foreground">
-          {trader.strategyText.length} / 2000
+          {(trader.strategyText || "").length} / 2000
         </p>
       </div>
     </div>

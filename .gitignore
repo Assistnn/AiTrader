@@ -47,3 +47,6 @@ postgres_data/
 
 # Claude Code
 .claude/
+
+# Serena MCP
+.serena/

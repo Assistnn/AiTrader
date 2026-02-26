@@ -1,5 +1,5 @@
 /**
- * Config Changes Page.
+ * 設定変更履歴画面
  * Reference: 08_API仕様 Section 3-13, 01_画面仕様
  */
 
@@ -9,7 +9,8 @@ import { useState } from "react";
 import useSWR from "swr";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { fetcher } from "@/lib/api";
+import { fetcher, paginatedFetcher } from "@/lib/api";
+import { Button } from "@/components/ui/button";
 import { JsonDiffViewer } from "@/components/dashboard/JsonDiffViewer";
 
 interface ConfigChangeItem {
@@ -31,10 +32,14 @@ export function ConfigChangesPage() {
   const [page, setPage] = useState(1);
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
-  const { data: changes } = useSWR<ConfigChangeItem[]>(
+  const { data: result } = useSWR(
     `/api/v1/config-changes?page=${page}&perPage=20`,
-    fetcher
+    paginatedFetcher<ConfigChangeItem>
   );
+
+  const changes = result?.data ?? [];
+  const totalPages = result?.pagination?.totalPages ?? 1;
+  const totalItems = result?.pagination?.totalItems ?? 0;
 
   const { data: detail } = useSWR<ConfigChangeDetail>(
     expandedId ? `/api/v1/config-changes/${expandedId}` : null,
@@ -43,22 +48,22 @@ export function ConfigChangesPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Config Changes</h1>
+      <h1 className="text-2xl font-bold">設定変更履歴</h1>
 
       <Card>
         <CardContent className="p-0">
           <table className="w-full text-sm">
             <thead className="bg-muted/50">
               <tr>
-                <th className="p-3 text-left">Date</th>
-                <th className="p-3 text-left">Trader</th>
-                <th className="p-3 text-left">Type</th>
-                <th className="p-3 text-left">Stage</th>
-                <th className="p-3 text-left">Reason</th>
+                <th className="p-3 text-left">日時</th>
+                <th className="p-3 text-left">トレーダー</th>
+                <th className="p-3 text-left">種別</th>
+                <th className="p-3 text-left">ステージ</th>
+                <th className="p-3 text-left">変更理由</th>
               </tr>
             </thead>
             <tbody>
-              {changes?.map((c) => (
+              {changes.map((c) => (
                 <tr
                   key={c.id}
                   className="border-t cursor-pointer hover:bg-muted/30"
@@ -79,10 +84,10 @@ export function ConfigChangesPage() {
                   </td>
                 </tr>
               ))}
-              {(!changes || changes.length === 0) && (
+              {changes.length === 0 && (
                 <tr>
                   <td colSpan={5} className="p-6 text-center text-muted-foreground">
-                    No config changes found
+                    設定変更履歴がありません
                   </td>
                 </tr>
               )}
@@ -96,7 +101,7 @@ export function ConfigChangesPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">
-              Change #{detail.id} — {detail.configType}
+              変更 #{detail.id} — {detail.configType}
               {detail.stage ? ` / ${detail.stage}` : ""}
             </CardTitle>
           </CardHeader>
@@ -110,22 +115,30 @@ export function ConfigChangesPage() {
       )}
 
       {/* Pagination */}
-      <div className="flex gap-2 justify-center">
-        <button
-          className="px-3 py-1 border rounded disabled:opacity-50"
-          disabled={page <= 1}
-          onClick={() => setPage((p) => p - 1)}
-        >
-          Prev
-        </button>
-        <span className="px-3 py-1">Page {page}</span>
-        <button
-          className="px-3 py-1 border rounded"
-          onClick={() => setPage((p) => p + 1)}
-        >
-          Next
-        </button>
-      </div>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page <= 1}
+            onClick={() => setPage((p) => p - 1)}
+          >
+            前へ
+          </Button>
+          <span className="text-sm text-muted-foreground">
+            {page} / {totalPages}
+            {totalItems > 0 && ` (${totalItems}件)`}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page >= totalPages}
+            onClick={() => setPage((p) => p + 1)}
+          >
+            次へ
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

@@ -39,6 +39,15 @@ const config: Config = {
           DEFAULT: "hsl(var(--popover))",
           foreground: "hsl(var(--popover-foreground))",
         },
+        profit: "hsl(var(--profit))",
+        loss: "hsl(var(--loss))",
+        bid: "hsl(var(--bid))",
+        ask: "hsl(var(--ask))",
+        "nav-active": {
+          DEFAULT: "hsl(var(--nav-active))",
+          foreground: "hsl(var(--nav-active-foreground))",
+        },
+        // Legacy aliases
         buy: "#22c55e",
         sell: "#ef4444",
       },
