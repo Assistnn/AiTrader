@@ -44,9 +44,73 @@ _STATUS_CODE_MAP = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup — Reference: 16書§2-2
+    import logging
+    from app.logging_config import setup_logging
+    setup_logging(settings.LOG_LEVEL, settings.LOG_DIR)
+    _logger = logging.getLogger(__name__)
+    _logger.info(
+        "Application starting",
+        extra={"data": {"trading_mode": settings.TRADING_MODE.value, "log_level": settings.LOG_LEVEL}},
+    )
+
+    from app.services.engine.engine_manager import EngineManager
+
+    engine_manager = EngineManager()
+    app.state.engine_manager = engine_manager
+
+    # Load previously-running traders from DB
+    from app.db.session import async_session_factory
+    from sqlalchemy import select
+    from app.models.trader import Trader
+    from app.models.exchange_config import ExchangeConfig
+    from app.services.auth.key_vault import KeyVault
+    from app.config import settings as app_settings
+
+    running_traders: list[dict] = []
+    try:
+        async with async_session_factory() as session:
+            q = select(Trader).where(Trader.status == "running")
+            result = await session.execute(q)
+            traders = result.scalars().all()
+
+            if traders:
+                vault = KeyVault(app_settings.MASTER_ENCRYPTION_KEY)
+                user_ids = {t.user_id for t in traders}
+                # Batch fetch exchange configs for all relevant users
+                ec_q = select(ExchangeConfig).where(
+                    ExchangeConfig.user_id.in_(user_ids),
+                    ExchangeConfig.is_active == True,
+                )
+                ec_result = await session.execute(ec_q)
+                ec_map: dict[tuple[int, str], ExchangeConfig] = {}
+                for ec in ec_result.scalars().all():
+                    ec_map[(ec.user_id, ec.exchange_type)] = ec
+
+                for t in traders:
+                    exchange_type = "gmo_fx" if t.trade_type == "FX" else "bitbank"
+                    ec = ec_map.get((t.user_id, exchange_type))
+                    api_key = vault.decrypt(ec.api_key_encrypted) if ec else ""
+                    api_secret = vault.decrypt(ec.api_secret_encrypted) if ec else ""
+                    pair = t.symbols[0] if t.symbols else "USD_JPY"
+                    running_traders.append({
+                        "id": t.id,
+                        "pair": pair,
+                        "trade_type": t.trade_type,
+                        "api_key": api_key,
+                        "api_secret": api_secret,
+                        "config": {},
+                    })
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Failed to load running traders on startup")
+
+    await engine_manager.startup(running_traders if running_traders else None)
+
     yield
-    # Shutdown
+
+    # Shutdown — Reference: 16書§2-2
+    await engine_manager.shutdown()
 
 
 app = FastAPI(

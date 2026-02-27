@@ -15,6 +15,7 @@ from app.services.exchange.bitbank_exchange import BitbankExchange
 from app.services.exchange.price_normalizer import PriceNormalizer
 from app.services.pipeline.data_ingest import BaseDataProvider
 from app.services.pipeline.bitbank_data_provider import BitbankDataProvider
+from app.services.pipeline.gmo_fx_data_provider import GmoFxDataProvider
 
 if TYPE_CHECKING:
     from app.services.backtest.simulation_clock import SimulationClock
@@ -72,6 +73,7 @@ class ExchangeFactory:
         if trade_type == "Crypto":
             return BitbankDataProvider()
 
-        raise NotImplementedError(
-            f"Data provider for {trade_type}: GmoFxDataProvider requires API integration"
-        )
+        if trade_type == "FX":
+            return GmoFxDataProvider()
+
+        raise ValueError(f"Unknown trade_type: {trade_type}")

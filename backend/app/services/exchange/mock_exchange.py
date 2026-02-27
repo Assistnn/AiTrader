@@ -6,6 +6,7 @@ Reference: 06_取引所抽象化 Section 7
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -24,6 +25,8 @@ from app.services.exchange.exchange_types import (
     OrderType,
 )
 from app.services.exchange.price_normalizer import PriceNormalizer
+
+logger = logging.getLogger(__name__)
 
 
 class MockExchange(BaseExchange):
@@ -135,6 +138,10 @@ class MockExchange(BaseExchange):
                 "amount": amount, "price": fill_price,
                 "timestamp": now.isoformat(),
             })
+            logger.debug(
+                "MockExchange order filled: pair=%s side=%s amount=%s price=%s slippage_pips=%s",
+                pair, side.value, amount, fill_price, self.slippage_pips,
+            )
             return order
 
         # LIMIT/STOP orders stored as pending
@@ -198,6 +205,7 @@ class MockExchange(BaseExchange):
             filled_amount=close_amount, filled_price=exit_price,
             created_at=now, updated_at=now,
         )
+        self.orders.append(order)
 
         # Update or remove position
         if close_amount >= pos.amount:

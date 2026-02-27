@@ -1,11 +1,13 @@
 """
 Model Stages API routes.
-Reference: 08_API仕様 Section 3-5
+Reference: 08_API仕様 Section 3-5, 16_実行エンジンとUI接続 Section 7-2
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +19,8 @@ from app.models.config_change import ConfigChange
 from app.schemas.model_stage import ModelStageResponse, ModelStageUpdateRequest
 from app.api.deps import get_current_user
 from app.api.response import ok
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/v1/traders/{trader_id}/model-stages",
@@ -101,6 +105,7 @@ async def update_model_stage(
     trader_id: int,
     stage: str,
     req: ModelStageUpdateRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -144,6 +149,18 @@ async def update_model_stage(
 
     await db.flush()
     await db.commit()
+
+    # Notify running engine via ConfigEventBus (16書§7-2)
+    engine_manager = request.app.state.engine_manager
+    try:
+        await engine_manager.reload_config(
+            trader_id=trader_id,
+            config_type="model_stage",
+            new_config=config.config_json,
+            stage=stage,
+        )
+    except Exception:
+        logger.warning("ConfigEventBus publish failed for trader %d", trader_id)
 
     return ok({
         **ModelStageResponse(

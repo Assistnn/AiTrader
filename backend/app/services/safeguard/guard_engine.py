@@ -11,8 +11,10 @@ Design principles:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
+from app.logging_config import log_with_data
 from app.services.pipeline.data_types import StateSnapshot, Ticker
 from app.services.safeguard.guard_rules import (
     BaseGuard,
@@ -29,6 +31,9 @@ from app.services.safeguard.guard_types import (
     ProposedOrder,
     SafeguardSettings,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class GuardEngine:
@@ -81,9 +86,23 @@ class GuardEngine:
                 proposed_order=proposed_order,
                 now=now,
             )
+            if evaluation.result in (GuardResult.BLOCK, GuardResult.HALT):
+                log_with_data(logger, logging.WARNING, "Guard triggered", {
+                    "guard_id": evaluation.guard_id,
+                    "result": evaluation.result.value,
+                    "reason": evaluation.reason,
+                })
             evaluations.append(evaluation)
 
-        return self._aggregate(evaluations, now)
+        guard_state = self._aggregate(evaluations, now)
+        log_with_data(logger, logging.INFO, "Guard evaluation", {
+            "guard_count": len(evaluations),
+            "entry_allowed": guard_state.entry_allowed,
+            "trader_halted": guard_state.trader_halted,
+            "blocking_guards": guard_state.blocking_guards,
+            "lot_multiplier": guard_state.lot_multiplier,
+        })
+        return guard_state
 
     def evaluate_pre_entry(
         self,
@@ -99,7 +118,7 @@ class GuardEngine:
 
         Reference: Section 8 evaluate_pre_entry
         """
-        return self.evaluate_all(
+        result = self.evaluate_all(
             state=state,
             ticker=ticker,
             account=account,
@@ -107,6 +126,13 @@ class GuardEngine:
             proposed_order=proposed_order,
             now=now,
         )
+        if not result.entry_allowed:
+            log_with_data(logger, logging.INFO, "Pre-entry guard blocked", {
+                "blocking_guards": result.blocking_guards,
+                "pair": proposed_order.pair,
+                "side": proposed_order.side,
+            })
+        return result
 
     def get_consecutive_loss_guard(self) -> SG006_009_ConsecutiveLoss | None:
         """Get the consecutive loss guard for external state management."""

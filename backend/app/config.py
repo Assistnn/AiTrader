@@ -49,11 +49,54 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     CLAUDE_API_KEY: str = ""
 
+    # --- Engine (16_実行エンジンとUI接続 Section 14) ---
+    ENGINE_WARMUP_BARS: int = 200
+    ENGINE_POSITION_SYNC_INTERVAL: int = 30  # seconds
+    ENGINE_MAX_RESTART_COUNT: int = 3
+    ENGINE_RESTART_DELAY: float = 30.0  # seconds
+
+    # --- Retry ---
+    RETRY_MAX_ATTEMPTS: int = 3
+    RETRY_BASE_DELAY: float = 1.0
+    RETRY_MAX_DELAY: float = 60.0
+
+    # --- Circuit Breaker ---
+    CB_FAILURE_THRESHOLD: int = 5
+    CB_RECOVERY_TIMEOUT: float = 300.0  # seconds
+
+    # --- Market Data ---
+    BAR_POLL_DELAY: float = 5.0  # seconds after bar close
+    WS_RECONNECT_MAX_DELAY: float = 60.0
+    WS_DISCONNECT_ALERT_THRESHOLD: float = 300.0  # seconds
+
+    # --- Economic Calendar ---
+    ECONOMIC_CALENDAR_FETCH_INTERVAL: int = 21600  # 6 hours
+    ECONOMIC_CALENDAR_REFRESH_HOURS: int = 6
+    ECONOMIC_CALENDAR_API_URL: str = ""  # External API URL (empty = disabled)
+    ECONOMIC_CALENDAR_FALLBACK_BLOCK: bool = True
+
+    # --- Order ---
+    ORDER_FILL_TIMEOUT: float = 10.0  # seconds
+    ORDER_FILL_POLL_INTERVAL: float = 1.0
+
+    # --- GMO Coin ---
+    GMO_BASE_URL_PUBLIC: str = "https://api.coin.z.com/public"
+    GMO_BASE_URL_PRIVATE: str = "https://api.coin.z.com/private"
+    GMO_WS_URL: str = "wss://api.coin.z.com/ws/public/v1"
+
+    # --- bitbank ---
+    BITBANK_BASE_URL_PUBLIC: str = "https://public.bitbank.cc"
+    BITBANK_BASE_URL_PRIVATE: str = "https://api.bitbank.cc"
+    BITBANK_WS_URL: str = "wss://stream.bitbank.cc/socket.io/"
+
     # --- CORS ---
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
     # --- Logging ---
     LOG_LEVEL: str = "INFO"
+    LOG_DIR: str = "logs"
+    LOG_MAX_BYTES: int = 50_000_000
+    LOG_BACKUP_COUNT: int = 10
 
     @field_validator("TRADING_MODE", mode="before")
     @classmethod

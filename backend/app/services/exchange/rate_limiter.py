@@ -7,7 +7,12 @@ Reference: 06_取引所抽象化 Section 8-3
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
+
+from app.logging_config import log_with_data
+
+logger = logging.getLogger(__name__)
 
 
 class OrderRateLimiter:
@@ -78,6 +83,11 @@ class OrderRateLimiter:
                 await asyncio.sleep(wait)
                 total_wait += wait
 
+        if total_wait > 0:
+            log_with_data(logger, logging.INFO, "Rate limiter throttling", {
+                "wait_ms": round(total_wait * 1000, 1),
+                "reason": "rate_limit",
+            })
         return total_wait
 
     def record_order(self) -> None:

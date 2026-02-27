@@ -1,13 +1,14 @@
 """
 Dashboard API routes.
-Reference: 08_API仕様 Section 3-3
+Reference: 08_API仕様 Section 3-3, 16_実行エンジンとUI接続 Section 6-4
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,9 +19,14 @@ from app.models.position import Position
 from app.models.trade_history import TradeHistory
 from app.models.pipeline_log import PipelineLog
 from app.models.safeguard_log import SafeguardLog
+from app.models.exchange_config import ExchangeConfig
 from app.schemas.dashboard import DashboardSummaryResponse, TraderSummary, PipelineStateResponse
 from app.api.deps import get_current_user
 from app.api.response import ok
+from app.services.auth.key_vault import KeyVault
+from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
 
@@ -157,51 +163,120 @@ async def get_dashboard_summary(
 
 @router.post("/close-all")
 async def close_all_positions(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """全ポジション決済."""
-    q = select(Position).where(Position.user_id == user.id)
-    result = await db.execute(q)
-    positions = result.scalars().all()
+    """全ポジション決済.
 
-    closed_count = len(positions)
+    Reference: 16書§6-4 — 全トレーダーの全ポジション決済後、停止
+    """
+    engine_manager = request.app.state.engine_manager
+    exchange_closed = 0
+
+    # Close exchange positions via engines
+    q = select(Trader).where(Trader.user_id == user.id, Trader.status == "running")
+    result = await db.execute(q)
+    running_traders = result.scalars().all()
+
+    for t in running_traders:
+        engine = engine_manager._engines.get(t.id)
+        if engine is not None:
+            results = await engine.execution_engine.close_all_positions()
+            exchange_closed += sum(1 for r in results if r.success)
+
+    # Clean up DB position records
+    pos_q = select(Position).where(Position.user_id == user.id)
+    pos_result = await db.execute(pos_q)
+    positions = pos_result.scalars().all()
+
+    db_count = len(positions)
     for p in positions:
         await db.delete(p)
     await db.flush()
 
-    return {"status": "ok", "data": {"closedCount": closed_count}}
+    return ok({"closedCount": max(exchange_closed, db_count)})
 
 
 @router.post("/stop-all")
 async def stop_all_traders(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """全トレーダー停止."""
+    """全トレーダー停止.
+
+    Reference: 16書§6-4
+    """
+    engine_manager = request.app.state.engine_manager
+
     q = select(Trader).where(Trader.user_id == user.id, Trader.status == "running")
     result = await db.execute(q)
     traders = result.scalars().all()
 
     for t in traders:
+        try:
+            await engine_manager.stop_trader(t.id, force_close=False)
+        except Exception:
+            logger.exception("Failed to stop engine for trader %d", t.id)
         t.status = "stopped"
     await db.flush()
 
-    return {"status": "ok", "data": {"stoppedCount": len(traders)}}
+    return ok({"stoppedCount": len(traders)})
 
 
 @router.post("/start-all")
 async def start_all_traders(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """全トレーダー開始."""
+    """全トレーダー開始.
+
+    Reference: 16書§6-4
+    """
+    engine_manager = request.app.state.engine_manager
+    vault = KeyVault(settings.MASTER_ENCRYPTION_KEY)
+
     q = select(Trader).where(Trader.user_id == user.id, Trader.status == "stopped")
     result = await db.execute(q)
     traders = result.scalars().all()
 
-    for t in traders:
-        t.status = "running"
-    await db.flush()
+    # Batch fetch exchange configs
+    ec_q = select(ExchangeConfig).where(
+        ExchangeConfig.user_id == user.id,
+        ExchangeConfig.is_active == True,
+    )
+    ec_result = await db.execute(ec_q)
+    ec_map: dict[str, ExchangeConfig] = {}
+    for ec in ec_result.scalars().all():
+        ec_map[ec.exchange_type] = ec
 
-    return {"status": "ok", "data": {"startedCount": len(traders)}}
+    started = 0
+    for t in traders:
+        exchange_type = "gmo_fx" if t.trade_type == "FX" else "bitbank"
+        ec = ec_map.get(exchange_type)
+        if ec is None:
+            logger.warning("No API key for trader %d (%s), skipping", t.id, exchange_type)
+            continue
+
+        api_key = vault.decrypt(ec.api_key_encrypted)
+        api_secret = vault.decrypt(ec.api_secret_encrypted)
+        pair = t.symbols[0] if t.symbols else "USD_JPY"
+
+        try:
+            await engine_manager.start_trader(
+                trader_id=t.id,
+                pair=pair,
+                trade_type=t.trade_type,
+                api_key=api_key,
+                api_secret=api_secret,
+                trader_config={},
+            )
+            t.status = "running"
+            started += 1
+        except Exception:
+            logger.exception("Failed to start engine for trader %d", t.id)
+
+    await db.flush()
+    return ok({"startedCount": started})

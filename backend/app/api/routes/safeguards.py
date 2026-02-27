@@ -1,11 +1,13 @@
 """
 Safeguards API routes.
-Reference: 08_API仕様 Section 3-6
+Reference: 08_API仕様 Section 3-6, 16_実行エンジンとUI接続 Section 7-2
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +24,8 @@ from app.schemas.safeguard import (
 )
 from app.api.deps import get_current_user
 from app.api.response import ok, paginated
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/v1/traders/{trader_id}/safeguards",
@@ -69,10 +73,12 @@ async def get_safeguard_config(
 async def update_safeguard_config(
     trader_id: int,
     req: SafeguardConfigUpdateRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """セーフガード設定更新."""
+    logger.info("Updating safeguard config for trader %d", trader_id)
     await _verify_trader_ownership(trader_id, user, db)
 
     q = select(SafeguardConfig).where(SafeguardConfig.trader_id == trader_id)
@@ -106,6 +112,17 @@ async def update_safeguard_config(
 
     await db.flush()
     await db.commit()
+
+    # Notify running engine via ConfigEventBus (16書§7-2)
+    engine_manager = request.app.state.engine_manager
+    try:
+        await engine_manager.reload_config(
+            trader_id=trader_id,
+            config_type="safeguard",
+            new_config=config.config_json,
+        )
+    except Exception:
+        logger.warning("ConfigEventBus publish failed for trader %d", trader_id)
 
     return ok(SafeguardConfigResponse(
         id=config.id,

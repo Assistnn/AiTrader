@@ -6,6 +6,7 @@ Reference: 04_判定パイプライン Section 6
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -15,6 +16,8 @@ from app.services.decision.decision_types import JudgeConfig, JudgeInput, JudgeO
 
 if TYPE_CHECKING:
     from app.services.ai.judge_helper import AIJudgeHelper
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -58,8 +61,10 @@ class M4ExitJudge(BaseJudge):
             )
             if ai_result and ai_result.confidence >= config.params.get("minConfidence", 0.7):
                 ai_result._debug["ai_adopted"] = True
+                logger.info("M4 AI adopted: confidence=%.2f", ai_result.confidence)
                 return ai_result
             rule_result._debug["ai_adopted"] = False
+            logger.info("M4 AI rejected, using rule result")
             return rule_result
         if config.mode == "aiFull":
             if self._ai_helper is None:
@@ -77,6 +82,7 @@ class M4ExitJudge(BaseJudge):
 
     def _judge_rule(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
         """M4 rule mode exit management. Reference: Section 6-4"""
+        logger.debug("M4 _judge_rule: pair=%s", input.pair)
         if not config.enabled:
             return JudgeOutput(
                 result={"action": "HOLD"},

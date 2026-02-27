@@ -6,6 +6,7 @@ Reference: 04_判定パイプライン Section 4
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from app.services.decision.base_judge import BaseJudge
@@ -13,6 +14,8 @@ from app.services.decision.decision_types import JudgeConfig, JudgeInput, JudgeO
 
 if TYPE_CHECKING:
     from app.services.ai.judge_helper import AIJudgeHelper
+
+logger = logging.getLogger(__name__)
 
 
 class M2SetupJudge(BaseJudge):
@@ -39,8 +42,10 @@ class M2SetupJudge(BaseJudge):
             )
             if ai_result and ai_result.confidence >= config.params.get("minConfidence", 0.7):
                 ai_result._debug["ai_adopted"] = True
+                logger.info("M2 AI adopted: confidence=%.2f", ai_result.confidence)
                 return ai_result
             rule_result._debug["ai_adopted"] = False
+            logger.info("M2 AI rejected, using rule result")
             return rule_result
         if config.mode == "aiFull":
             if self._ai_helper is None:
@@ -58,6 +63,7 @@ class M2SetupJudge(BaseJudge):
 
     def _judge_rule(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
         """M2 rule mode judgment. Reference: Section 4-4"""
+        logger.debug("M2 _judge_rule: pair=%s", input.pair)
         preset = config.params.get("preset", "trendFollow")
         m1_result = input.previous_stages.get("m1", {})
         if isinstance(m1_result, JudgeOutput):

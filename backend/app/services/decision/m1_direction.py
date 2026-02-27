@@ -6,6 +6,7 @@ Reference: 04_判定パイプライン Section 3
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from app.services.decision.base_judge import BaseJudge
@@ -13,6 +14,8 @@ from app.services.decision.decision_types import JudgeConfig, JudgeInput, JudgeO
 
 if TYPE_CHECKING:
     from app.services.ai.judge_helper import AIJudgeHelper
+
+logger = logging.getLogger(__name__)
 
 
 class M1DirectionJudge(BaseJudge):
@@ -46,9 +49,11 @@ class M1DirectionJudge(BaseJudge):
         )
         if ai_result and ai_result.confidence >= config.params.get("minConfidence", 0.7):
             ai_result._debug["ai_adopted"] = True
+            logger.info("M1 AI adopted: confidence=%.2f", ai_result.confidence)
             return ai_result
         rule_result._debug["ai_adopted"] = False
         rule_result._debug["ai_fallback_reason"] = "low_confidence_or_failure"
+        logger.info("M1 AI rejected, using rule result")
         return rule_result
 
     async def _judge_ai_full(self, input: JudgeInput, config: JudgeConfig) -> JudgeOutput:
@@ -70,6 +75,7 @@ class M1DirectionJudge(BaseJudge):
         """M1 rule mode judgment. Reference: Section 3-4"""
         state = input.state
         debug: dict = {}
+        logger.debug("M1 _judge_rule: pair=%s", input.pair)
 
         # Get primary timeframe indicator snapshot
         primary_tf = config.timeframes[-1] if config.timeframes else "H1"

@@ -31,6 +31,23 @@ class ConnectionManager:
         self.active_connections: Set[WebSocket] = set()
         self._subscriptions: Dict[WebSocket, Dict[str, Any]] = {}
         self._mock_task: asyncio.Task | None = None
+        self._live_feed_active: bool = False
+
+    @property
+    def live_feed_active(self) -> bool:
+        """Check if live data feed is active (vs mock)."""
+        return self._live_feed_active
+
+    def set_live_feed(self, active: bool) -> None:
+        """Switch between live and mock price feed.
+
+        Reference: 16書§8-1 — MarketDataFeed からの実データ切替
+        """
+        self._live_feed_active = active
+        if active and self._mock_task and not self._mock_task.done():
+            self._mock_task.cancel()
+            self._mock_task = None
+            logger.info("WebSocket: switched to live price feed")
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -39,9 +56,10 @@ class ConnectionManager:
         logger.info(
             "WebSocket connected. Total: %d", len(self.active_connections)
         )
-        # Start mock price feed if not running
-        if self._mock_task is None or self._mock_task.done():
-            self._mock_task = asyncio.create_task(self._mock_price_loop())
+        # Start mock price feed only if no live feed active
+        if not self._live_feed_active:
+            if self._mock_task is None or self._mock_task.done():
+                self._mock_task = asyncio.create_task(self._mock_price_loop())
 
     def disconnect(self, websocket: WebSocket) -> None:
         self.active_connections.discard(websocket)

@@ -92,4 +92,6 @@ class ExecutionResult:
     size_result: PositionSizeResult | None = None
     success: bool = True
     error: str | None = None
+    tp_order_id: str | None = None  # OCO TP order ID (§9-2)
+    sl_order_id: str | None = None  # OCO SL order ID (§9-2)
     _debug: dict = field(default_factory=dict)

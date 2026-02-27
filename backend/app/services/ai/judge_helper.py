@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from app.logging_config import log_with_data
 from app.services.ai.ai_types import AIResponse
 from app.services.ai.base_provider import BaseAIProvider
 from app.services.ai.budget_tracker import BudgetStatus, BudgetTracker, UsageRecord
@@ -105,6 +106,17 @@ class AIJudgeHelper:
         # 8. Build JudgeOutput
         confidence = parsed.get("confidence", 0.0)
         reason_codes = parsed.get("reason_codes", [])
+
+        log_with_data(logger, logging.INFO, "AI judgment", {
+            "stage": stage,
+            "trader_id": trader_id,
+            "provider": self._provider.provider_name(),
+            "model": response.model,
+            "tokens_in": response.tokens_input,
+            "tokens_out": response.tokens_output,
+            "latency_ms": response.latency_ms,
+            "confidence": confidence,
+        })
 
         return JudgeOutput(
             result=parsed,

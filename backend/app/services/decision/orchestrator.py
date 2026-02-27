@@ -6,12 +6,14 @@ Reference: 04_判定パイプライン Section 8
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
+from app.logging_config import log_with_data
 from app.services.decision.base_judge import BaseJudge
 from app.services.decision.decision_types import (
     JudgeConfig,
@@ -23,6 +25,9 @@ from app.services.decision.mx_integrator import MXIntegrator
 from app.services.safeguard.guard_engine import GuardEngine
 from app.services.safeguard.guard_rules import PositionInfo
 from app.services.safeguard.guard_types import AccountState, GuardState, ProposedOrder
+
+
+logger = logging.getLogger(__name__)
 
 
 class DecisionOrchestrator:
@@ -83,6 +88,10 @@ class DecisionOrchestrator:
             )
 
         if guard_state.trader_halted:
+            log_with_data(logger, logging.INFO, "Pipeline HALTED", {
+                "execution_id": execution_id, "pair": pair,
+                "halted_by": guard_state.blocking_guards,
+            })
             return PipelineResult(
                 action="HALTED",
                 execution_id=execution_id,
@@ -91,6 +100,10 @@ class DecisionOrchestrator:
             )
 
         if not guard_state.entry_allowed:
+            log_with_data(logger, logging.INFO, "Pipeline BLOCKED", {
+                "execution_id": execution_id, "pair": pair,
+                "blocked_by": guard_state.blocking_guards,
+            })
             return PipelineResult(
                 action="BLOCKED",
                 execution_id=execution_id,
@@ -115,6 +128,10 @@ class DecisionOrchestrator:
         m1_output = await self._execute_stage("m1", self.m1, judge_input, m1_cfg, execution_id)
 
         if not m1_output.result.get("tradeAllowed", False):
+            log_with_data(logger, logging.INFO, "Pipeline NO_TRADE at M1", {
+                "execution_id": execution_id, "pair": pair,
+                "reason_codes": m1_output.reason_codes,
+            })
             return PipelineResult(
                 action="NO_TRADE",
                 execution_id=execution_id,
@@ -131,6 +148,9 @@ class DecisionOrchestrator:
 
         # 3. MX integration check
         if not self.mx.should_execute_m3(m1_output, m2_output):
+            log_with_data(logger, logging.INFO, "Pipeline NO_TRADE at MX gate", {
+                "execution_id": execution_id, "pair": pair,
+            })
             return PipelineResult(
                 action="NO_TRADE",
                 execution_id=execution_id,
@@ -148,6 +168,10 @@ class DecisionOrchestrator:
 
         entry = m3_output.result.get("entry", "NO_TRADE")
         if entry == "NO_TRADE":
+            log_with_data(logger, logging.INFO, "Pipeline NO_TRADE at M3", {
+                "execution_id": execution_id, "pair": pair,
+                "reason_codes": m3_output.reason_codes,
+            })
             return PipelineResult(
                 action="NO_TRADE",
                 execution_id=execution_id,
@@ -161,6 +185,9 @@ class DecisionOrchestrator:
         # 5. MX final decision
         should_trade, mx_debug = self.mx.should_trade(m1_output, m2_output, m3_output)
         if not should_trade:
+            log_with_data(logger, logging.INFO, "Pipeline NO_TRADE at MX final", {
+                "execution_id": execution_id, "pair": pair,
+            })
             return PipelineResult(
                 action="NO_TRADE",
                 execution_id=execution_id,
@@ -192,6 +219,10 @@ class DecisionOrchestrator:
         )
 
         if not pre_entry_guard.entry_allowed:
+            log_with_data(logger, logging.INFO, "Pipeline BLOCKED pre-entry", {
+                "execution_id": execution_id, "pair": pair,
+                "blocked_by": pre_entry_guard.blocking_guards,
+            })
             return PipelineResult(
                 action="BLOCKED",
                 execution_id=execution_id,
@@ -202,6 +233,14 @@ class DecisionOrchestrator:
                 _debug={"pre_entry_blocked_by": pre_entry_guard.blocking_guards},
             )
 
+        log_with_data(logger, logging.INFO, "Pipeline ENTRY signal", {
+            "execution_id": execution_id, "pair": pair,
+            "side": entry,
+            "lot_size": proposed_order.lot_size,
+            "sl_pips": proposed_order.sl_pips,
+            "tp_pips": proposed_order.tp_pips,
+            "rr_ratio": round(proposed_order.tp_pips / proposed_order.sl_pips, 2) if proposed_order.sl_pips else 0,
+        })
         return PipelineResult(
             action="ENTRY",
             execution_id=execution_id,
@@ -257,7 +296,16 @@ class DecisionOrchestrator:
             timeframes=["M5", "M1"],
             params={"breakEven": True, "trailing": True, "partial": True, "maxHold": True},
         )
-        return await self._execute_stage("m4", self.m4, judge_input, m4_cfg, execution_id)
+        start = time.monotonic()
+        result = await self._execute_stage("m4", self.m4, judge_input, m4_cfg, execution_id)
+        elapsed = (time.monotonic() - start) * 1000
+        log_with_data(logger, logging.INFO, "M4 exit result", {
+            "execution_id": execution_id, "pair": pair,
+            "action": result.result.get("action"),
+            "confidence": result.confidence,
+            "elapsed_ms": round(elapsed, 2),
+        })
+        return result
 
     async def _execute_stage(
         self,
@@ -293,6 +341,28 @@ class DecisionOrchestrator:
             "elapsed_ms": round(elapsed_ms, 2),
         }
         self._logs.append(log_entry)
+
+        # Bridge to Python logging
+        result_summary = {
+            k: v for k, v in output.result.items()
+            if k in ("trend", "tradeAllowed", "setupValid", "entry", "action", "lotSize", "tpPips", "slPips")
+        }
+        log_with_data(logger, logging.INFO, "Pipeline stage completed", {
+            "execution_id": execution_id,
+            "pair": input.pair,
+            "stage": stage,
+            "mode": config.mode,
+            "result": result_summary,
+            "confidence": output.confidence,
+            "reason_codes": output.reason_codes,
+            "elapsed_ms": round(elapsed_ms, 2),
+        })
+        if output._debug and logger.isEnabledFor(logging.DEBUG):
+            log_with_data(logger, logging.DEBUG, "Pipeline stage debug", {
+                "execution_id": execution_id,
+                "stage": stage,
+                "debug": output._debug,
+            })
 
         return output
 
