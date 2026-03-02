@@ -74,7 +74,7 @@ echo.
 REM ------------------------------------------
 REM  Step 5: Frontend - npm install + build
 REM ------------------------------------------
-echo [5/6] Building frontend...
+echo [5/7] Building frontend...
 cd /d %ROOT%\frontend
 call %NPM% install --production=false --quiet 2>nul
 if errorlevel 1 (
@@ -89,9 +89,27 @@ echo [OK] Frontend built successfully.
 echo.
 
 REM ------------------------------------------
-REM  Step 6: Restart Frontend
+REM  Step 6: Setup standalone output
 REM ------------------------------------------
-echo [6/6] Restarting frontend service...
+echo [6/7] Setting up standalone output...
+cd /d %ROOT%\frontend
+
+REM Copy server.js from standalone to frontend root
+copy /Y .next\standalone\server.js server.js >nul
+
+REM Copy static files into standalone .next dir
+xcopy /E /I /Y /Q .next\static .next\standalone\.next\static >nul
+
+REM Copy standalone node_modules to frontend root (overwrite)
+xcopy /E /I /Y /Q .next\standalone\node_modules node_modules >nul
+
+echo [OK] Standalone setup completed.
+echo.
+
+REM ------------------------------------------
+REM  Step 7: Restart Frontend
+REM ------------------------------------------
+echo [7/7] Restarting frontend service...
 %NSSM% restart AiTradingFrontend
 if errorlevel 1 (
     echo [WARN] Frontend restart returned non-zero, checking status...
