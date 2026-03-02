@@ -85,6 +85,7 @@ class EngineManager:
         api_key: str = "",
         api_secret: str = "",
         trader_config: dict | None = None,
+        user_id: int = 0,
     ) -> None:
         """Start engine for a trader.
 
@@ -147,6 +148,7 @@ class EngineManager:
                 trader_config=trader_config,
                 indicator_engine=indicator_engine,
                 state_builder=state_builder,
+                user_id=user_id,
             )
 
             self._engines[trader_id] = engine

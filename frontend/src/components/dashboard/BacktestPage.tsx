@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { useBacktestList } from "@/hooks/useBacktest";
 import { useTraders } from "@/hooks/useDashboard";
+import { getPairOptions } from "@/constants/pairs";
 import { formatPct, formatDateJst } from "@/lib/utils";
 import { apiClient } from "@/lib/api";
 import type { BacktestRun, BacktestMetrics } from "@/types/api";
@@ -142,20 +143,24 @@ export function BacktestPage() {
                       label: t.traderName,
                     })) || []
                   }
-                  onChange={(e) =>
-                    setForm({ ...form, traderId: e.target.value })
-                  }
+                  onChange={(e) => {
+                    const tid = e.target.value;
+                    const traderType =
+                      traders?.find((t) => String(t.id) === tid)?.tradeType ||
+                      "FX";
+                    const defaultPair = getPairOptions(traderType)[0]?.value || "USD_JPY";
+                    setForm({ ...form, traderId: tid, pair: defaultPair });
+                  }}
                 />
               </div>
               <div>
                 <label className="text-xs font-medium">通貨ペア</label>
                 <Select
                   value={form.pair}
-                  options={[
-                    { value: "USD_JPY", label: "USD/JPY" },
-                    { value: "EUR_JPY", label: "EUR/JPY" },
-                    { value: "GBP_JPY", label: "GBP/JPY" },
-                  ]}
+                  options={getPairOptions(
+                    traders?.find((t) => String(t.id) === form.traderId)
+                      ?.tradeType || "FX"
+                  )}
                   onChange={(e) => setForm({ ...form, pair: e.target.value })}
                 />
               </div>

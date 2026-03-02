@@ -40,7 +40,7 @@ def _mask_key(encrypted: bytes | None) -> str:
     if encrypted is None:
         return "****"
     try:
-        vault = KeyVault()
+        vault = KeyVault(app_settings.MASTER_ENCRYPTION_KEY)
         decrypted = vault.decrypt(encrypted)
         if len(decrypted) > 4:
             return "****" + decrypted[-4:]
@@ -80,7 +80,7 @@ async def update_exchange_config(
     user: User = Depends(get_current_user),
 ):
     """取引所API設定更新."""
-    vault = KeyVault()
+    vault = KeyVault(app_settings.MASTER_ENCRYPTION_KEY)
 
     q = select(ExchangeConfig).where(
         ExchangeConfig.user_id == user.id,
@@ -108,7 +108,7 @@ async def update_exchange_config(
             config.is_active = req.is_active
 
     await db.flush()
-    await db.commit()
+    await db.refresh(config)
 
     return ok(ExchangeConfigResponse(
         id=config.id,
@@ -152,7 +152,7 @@ async def update_ai_config(
     user: User = Depends(get_current_user),
 ):
     """AI API設定更新."""
-    vault = KeyVault()
+    vault = KeyVault(app_settings.MASTER_ENCRYPTION_KEY)
 
     q = select(AiModelConfig).where(
         AiModelConfig.user_id == user.id,
@@ -180,7 +180,7 @@ async def update_ai_config(
             config.is_active = req.is_active
 
     await db.flush()
-    await db.commit()
+    await db.refresh(config)
 
     return ok(AiConfigResponse(
         id=config.id,

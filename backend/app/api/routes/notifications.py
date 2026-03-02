@@ -110,7 +110,7 @@ async def add_notification_email(
     )
     db.add(email)
     await db.flush()
-    await db.commit()
+    await db.refresh(email)
 
     return ok(NotificationEmailItem(
         id=email.id,
@@ -203,7 +203,7 @@ async def update_daily_notification_config(
         setattr(config, field, value)
 
     await db.flush()
-    await db.commit()
+    await db.refresh(config)
 
     return ok(DailyNotificationConfigResponse(
         id=config.id,

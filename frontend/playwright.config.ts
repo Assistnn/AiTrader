@@ -9,7 +9,7 @@ export default defineConfig({
   workers: 1,
   reporter: [["html", { open: "never" }], ["list"]],
   use: {
-    baseURL: "http://localhost:3000",
+    baseURL: process.env.BASE_URL ?? "http://localhost:3000",
     locale: "ja-JP",
     timezoneId: "Asia/Tokyo",
     trace: "on-first-retry",

@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { BarChart3 } from "lucide-react";
+import { BarChart3, Maximize2, Columns2, Grid2x2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "next-themes";
 import { apiClient } from "@/lib/api";
+import { useTraders } from "@/hooks/useDashboard";
 import {
   createChart,
   type IChartApi,
@@ -15,12 +16,6 @@ import {
 } from "lightweight-charts";
 
 type GridLayout = 1 | 2 | 4;
-
-const PAIRS = [
-  { value: "USD_JPY", label: "USD/JPY" },
-  { value: "EUR_JPY", label: "EUR/JPY" },
-  { value: "BTC_JPY", label: "BTC/JPY" },
-];
 
 const TIMEFRAMES = [
   { value: "M15", label: "15分" },
@@ -49,28 +44,6 @@ function toCandles(items: OhlcvApiItem[]): CandlestickData[] {
   }));
 }
 
-/** Fallback mock data when API is unavailable */
-function generateMockOhlc(pair: string, count = 100): CandlestickData[] {
-  const data: CandlestickData[] = [];
-  const basePrice = pair === "BTC_JPY" ? 6500000 : pair === "EUR_JPY" ? 162.5 : 150.0;
-  const volatility = pair === "BTC_JPY" ? 50000 : 0.5;
-  const now = Math.floor(Date.now() / 1000);
-  const interval = 900;
-
-  let price = basePrice;
-  for (let i = 0; i < count; i++) {
-    const time = (now - (count - i) * interval) as Time;
-    const change = (Math.random() - 0.48) * volatility;
-    const open = price;
-    const close = price + change;
-    const high = Math.max(open, close) + Math.random() * volatility * 0.5;
-    const low = Math.min(open, close) - Math.random() * volatility * 0.5;
-    data.push({ time, open, high, low, close });
-    price = close;
-  }
-  return data;
-}
-
 function getChartColors(isDark: boolean) {
   return {
     background: isDark ? "#1a1a2e" : "#ffffff",
@@ -79,6 +52,31 @@ function getChartColors(isDark: boolean) {
     upColor: isDark ? "#26a69a" : "#089981",
     downColor: isDark ? "#ef5350" : "#f23645",
   };
+}
+
+function formatPairLabel(pair: string): string {
+  return pair.replace("_", "/");
+}
+
+interface PairOption {
+  value: string;
+  label: string;
+}
+
+/** Extract unique pairs from trader list */
+function usePairOptions(): PairOption[] {
+  const { data: traders } = useTraders();
+  if (!traders || traders.length === 0) return [];
+  const seen = new Set<string>();
+  const options: PairOption[] = [];
+  for (const t of traders) {
+    const pair = t.symbols?.[0];
+    if (pair && !seen.has(pair)) {
+      seen.add(pair);
+      options.push({ value: pair, label: formatPairLabel(pair) });
+    }
+  }
+  return options;
 }
 
 interface ChartInstanceProps {
@@ -91,10 +89,12 @@ function ChartInstance({ pair, timeframe, isDark }: ChartInstanceProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const [hasData, setHasData] = useState(true);
 
   useEffect(() => {
     if (!containerRef.current) return;
 
+    setHasData(true);
     const colors = getChartColors(isDark);
     const chart = createChart(containerRef.current, {
       layout: {
@@ -122,7 +122,6 @@ function ChartInstance({ pair, timeframe, isDark }: ChartInstanceProps) {
     chartRef.current = chart;
     seriesRef.current = series;
 
-    // Fetch data from API, fall back to mock on error
     let cancelled = false;
     (async () => {
       try {
@@ -131,16 +130,14 @@ function ChartInstance({ pair, timeframe, isDark }: ChartInstanceProps) {
         );
         if (!cancelled && items.length > 0) {
           series.setData(toCandles(items));
+          chart.timeScale().fitContent();
         } else if (!cancelled) {
-          series.setData(generateMockOhlc(pair));
+          setHasData(false);
         }
       } catch {
         if (!cancelled) {
-          series.setData(generateMockOhlc(pair));
+          setHasData(false);
         }
-      }
-      if (!cancelled) {
-        chart.timeScale().fitContent();
       }
     })();
 
@@ -165,91 +162,158 @@ function ChartInstance({ pair, timeframe, isDark }: ChartInstanceProps) {
     };
   }, [pair, timeframe, isDark]);
 
-  return <div ref={containerRef} className="h-full w-full min-h-[200px]" />;
+  if (!hasData) {
+    return (
+      <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+        <div className="text-center">
+          <BarChart3 className="mx-auto mb-2 h-8 w-8 opacity-50" />
+          <p className="text-sm">データがありません</p>
+          <p className="text-xs mt-1">トレーダーを起動するとチャートデータが取得されます</p>
+        </div>
+      </div>
+    );
+  }
+
+  return <div ref={containerRef} className="h-full w-full" />;
+}
+
+/** Single chart pane with its own pair/timeframe selectors */
+function ChartPane({
+  pairs,
+  defaultPair,
+  defaultTimeframe,
+  isDark,
+  height,
+}: {
+  pairs: PairOption[];
+  defaultPair: string;
+  defaultTimeframe: string;
+  isDark: boolean;
+  height: string;
+}) {
+  const [pair, setPair] = useState(defaultPair);
+  const [timeframe, setTimeframe] = useState(defaultTimeframe);
+
+  // Update pair if defaultPair changes (e.g. trader list updated)
+  useEffect(() => {
+    if (pairs.length > 0 && !pairs.find((p) => p.value === pair)) {
+      setPair(pairs[0].value);
+    }
+  }, [pairs, pair]);
+
+  return (
+    <div className="flex flex-col rounded-lg border bg-card">
+      <div style={{ height }} className="relative">
+        {pairs.length > 0 ? (
+          <ChartInstance
+            key={`${pair}-${timeframe}`}
+            pair={pair}
+            timeframe={timeframe}
+            isDark={isDark}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-muted-foreground">
+            <div className="text-center">
+              <BarChart3 className="mx-auto mb-2 h-8 w-8 opacity-50" />
+              <p className="text-sm">トレーダーを作成してください</p>
+            </div>
+          </div>
+        )}
+      </div>
+      {/* Per-pane selectors below chart */}
+      <div className="flex items-center gap-2 border-t px-3 py-1.5">
+        <BarChart3 className="h-3.5 w-3.5 text-muted-foreground" />
+        <select
+          className="rounded border bg-background px-2 py-0.5 text-xs"
+          value={pair}
+          onChange={(e) => setPair(e.target.value)}
+          disabled={pairs.length === 0}
+        >
+          {pairs.length === 0 && <option value="">--</option>}
+          {pairs.map((p) => (
+            <option key={p.value} value={p.value}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <select
+          className="rounded border bg-background px-2 py-0.5 text-xs"
+          value={timeframe}
+          onChange={(e) => setTimeframe(e.target.value)}
+        >
+          {TIMEFRAMES.map((tf) => (
+            <option key={tf.value} value={tf.value}>
+              {tf.label}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
 }
 
 export function ChartPanel() {
   const [layout, setLayout] = useState<GridLayout>(1);
-  const [selectedPair, setSelectedPair] = useState("USD_JPY");
-  const [selectedTimeframe, setSelectedTimeframe] = useState("M15");
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
+  const pairs = usePairOptions();
 
-  // For multi-chart layout, assign different pairs
-  const chartPairs = layout === 1
-    ? [selectedPair]
-    : layout === 2
-    ? [selectedPair, PAIRS.find((p) => p.value !== selectedPair)?.value || "EUR_JPY"]
-    : PAIRS.slice(0, 4).map((p) => p.value);
+  const defaultPairs = pairs.length > 0
+    ? pairs.map((p) => p.value)
+    : [];
 
-  const layouts: { value: GridLayout; label: string }[] = [
-    { value: 1, label: "1" },
-    { value: 2, label: "2" },
-    { value: 4, label: "4" },
+  const paneCount = layout;
+  const chartHeight = layout === 1 ? "400px" : "280px";
+
+  const layoutButtons: { value: GridLayout; label: string; icon: React.ReactNode }[] = [
+    { value: 1, label: "1画面", icon: <Maximize2 className="h-3.5 w-3.5" /> },
+    { value: 2, label: "2画面", icon: <Columns2 className="h-3.5 w-3.5" /> },
+    { value: 4, label: "4画面", icon: <Grid2x2 className="h-3.5 w-3.5" /> },
   ];
 
   return (
-    <div className="flex flex-1 flex-col rounded-lg border bg-card">
-      {/* Chart toolbar */}
-      <div className="flex items-center justify-between border-b px-4 py-2">
+    <div>
+      {/* Header toolbar */}
+      <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <BarChart3 className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm font-medium">チャート</span>
+          <span className="text-sm font-medium">チャート表示</span>
         </div>
-        <div className="flex items-center gap-2">
-          <select
-            className="rounded-md border bg-background px-2 py-1 text-xs"
-            value={selectedPair}
-            onChange={(e) => setSelectedPair(e.target.value)}
-          >
-            {PAIRS.map((p) => (
-              <option key={p.value} value={p.value}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-          <select
-            className="rounded-md border bg-background px-2 py-1 text-xs"
-            value={selectedTimeframe}
-            onChange={(e) => setSelectedTimeframe(e.target.value)}
-          >
-            {TIMEFRAMES.map((tf) => (
-              <option key={tf.value} value={tf.value}>
-                {tf.label}
-              </option>
-            ))}
-          </select>
-          <div className="flex rounded-md border">
-            {layouts.map((l) => (
-              <button
-                key={l.value}
-                onClick={() => setLayout(l.value)}
-                className={cn(
-                  "px-2 py-1 text-xs",
-                  layout === l.value
-                    ? "bg-foreground text-background"
-                    : "text-muted-foreground hover:bg-accent"
-                )}
-              >
-                {l.label}画面
-              </button>
-            ))}
-          </div>
+        <div className="flex rounded-md border">
+          {layoutButtons.map((l) => (
+            <button
+              key={l.value}
+              onClick={() => setLayout(l.value)}
+              className={cn(
+                "flex items-center gap-1 px-2.5 py-1 text-xs",
+                layout === l.value
+                  ? "bg-foreground text-background"
+                  : "text-muted-foreground hover:bg-accent"
+              )}
+            >
+              {l.icon}
+              {l.label}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* Chart area */}
+      {/* Chart panes */}
       <div
         className={cn(
-          "flex-1 p-2",
-          layout === 2 && "grid grid-cols-2 gap-2",
-          layout === 4 && "grid grid-cols-2 grid-rows-2 gap-2"
+          layout === 2 && "grid grid-cols-2 gap-3",
+          layout === 4 && "grid grid-cols-2 gap-3"
         )}
       >
-        {chartPairs.map((pair, i) => (
-          <div key={`${pair}-${i}-${layout}-${selectedTimeframe}`} className="min-h-[200px]">
-            <ChartInstance pair={pair} timeframe={selectedTimeframe} isDark={isDark} />
-          </div>
+        {Array.from({ length: paneCount }, (_, i) => (
+          <ChartPane
+            key={`pane-${i}-${layout}`}
+            pairs={pairs}
+            defaultPair={defaultPairs[i % defaultPairs.length] ?? ""}
+            defaultTimeframe="M15"
+            isDark={isDark}
+            height={chartHeight}
+          />
         ))}
       </div>
     </div>

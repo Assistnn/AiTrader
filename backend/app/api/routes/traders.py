@@ -83,6 +83,7 @@ async def create_trader(
     )
     db.add(trader)
     await db.flush()
+    await db.refresh(trader)
 
     return ok(_trader_response(trader))
 
@@ -123,6 +124,7 @@ async def update_trader(
     for field, value in update_data.items():
         setattr(trader, field, value)
     await db.flush()
+    await db.refresh(trader)
 
     return ok(_trader_response(trader))
 
@@ -201,6 +203,7 @@ async def start_trader(
             api_key=api_key,
             api_secret=api_secret,
             trader_config={},
+            user_id=user.id,
         )
     except Exception as e:
         logger.exception("Failed to start engine for trader %d", trader_id)

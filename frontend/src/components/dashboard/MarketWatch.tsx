@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { useDashboardStore } from "@/stores/dashboardStore";
 import { apiClient, fetcher } from "@/lib/api";
 import type { PriceQuote } from "@/types/api";
+import { FX_PAIRS, CRYPTO_PAIRS, formatPairLabel, isCryptoPair } from "@/constants/pairs";
 
 interface MarketWatchItem {
   id: number;
@@ -16,13 +17,8 @@ interface MarketWatchItem {
 }
 
 const AVAILABLE_PAIRS = [
-  { value: "USD_JPY", label: "USD/JPY", group: "FX" },
-  { value: "EUR_JPY", label: "EUR/JPY", group: "FX" },
-  { value: "GBP_JPY", label: "GBP/JPY", group: "FX" },
-  { value: "AUD_JPY", label: "AUD/JPY", group: "FX" },
-  { value: "BTC_JPY", label: "BTC/JPY", group: "仮想通貨" },
-  { value: "ETH_JPY", label: "ETH/JPY", group: "仮想通貨" },
-  { value: "XRP_JPY", label: "XRP/JPY", group: "仮想通貨" },
+  ...FX_PAIRS.map((p) => ({ value: p, label: formatPairLabel(p), group: "FX" })),
+  ...CRYPTO_PAIRS.map((p) => ({ value: p, label: formatPairLabel(p), group: "仮想通貨" })),
 ];
 
 function PriceRow({
@@ -35,11 +31,7 @@ function PriceRow({
   removing: boolean;
 }) {
   const spread = price.ask - price.bid;
-  const isFx =
-    !price.pair.includes("BTC") &&
-    !price.pair.includes("ETH") &&
-    !price.pair.includes("XRP");
-  const decimals = isFx ? 3 : 1;
+  const decimals = isCryptoPair(price.pair) ? 1 : 3;
 
   return (
     <div className="group flex items-center justify-between py-2 text-sm">
@@ -86,18 +78,8 @@ export function MarketWatch() {
           .filter((p): p is PriceQuote => p !== undefined)
       : allPrices;
 
-  const fxPairs = displayPrices.filter(
-    (p) =>
-      !p.pair.includes("BTC") &&
-      !p.pair.includes("ETH") &&
-      !p.pair.includes("XRP")
-  );
-  const cryptoPairs = displayPrices.filter(
-    (p) =>
-      p.pair.includes("BTC") ||
-      p.pair.includes("ETH") ||
-      p.pair.includes("XRP")
-  );
+  const fxPairs = displayPrices.filter((p) => !isCryptoPair(p.pair));
+  const cryptoPairs = displayPrices.filter((p) => isCryptoPair(p.pair));
 
   const addablePairs = AVAILABLE_PAIRS.filter(
     (ap) => !watchedPairs.includes(ap.value)

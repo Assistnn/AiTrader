@@ -16,6 +16,7 @@ import type { Trader } from "@/types/api";
 import { apiClient } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { getPairOptions, getPairsForTradeType } from "@/constants/pairs";
 
 const defaultStageConfig = {
   enabled: true,
@@ -47,8 +48,8 @@ export function TraderSettingsPage() {
   const [deleting, setDeleting] = useState(false);
   const [createForm, setCreateForm] = useState({
     traderName: "",
-    tradeType: "fx",
-    symbols: "USD_JPY",
+    tradeType: "FX",
+    symbols: ["USD_JPY"] as string[],
     capitalJpy: 1000000,
     orderUnitLots: 1,
   });
@@ -120,14 +121,14 @@ export function TraderSettingsPage() {
       await apiClient.post("/api/v1/traders", {
         traderName: createForm.traderName,
         tradeType: createForm.tradeType,
-        symbols: createForm.symbols.split(",").map((s) => s.trim()),
+        symbols: createForm.symbols,
         capitalJpy: createForm.capitalJpy,
         orderUnitLots: createForm.orderUnitLots,
       });
       setCreateForm({
         traderName: "",
-        tradeType: "fx",
-        symbols: "USD_JPY",
+        tradeType: "FX",
+        symbols: ["USD_JPY"],
         capitalJpy: 1000000,
         orderUnitLots: 1,
       });
@@ -194,23 +195,47 @@ export function TraderSettingsPage() {
                 <Select
                   value={createForm.tradeType}
                   options={[
-                    { value: "fx", label: "FX" },
-                    { value: "crypto", label: "仮想通貨" },
+                    { value: "FX", label: "FX" },
+                    { value: "Crypto", label: "仮想通貨" },
                   ]}
-                  onChange={(e) =>
-                    setCreateForm((f) => ({ ...f, tradeType: e.target.value }))
-                  }
+                  onChange={(e) => {
+                    const newType = e.target.value;
+                    const defaultPair = getPairsForTradeType(newType)[0];
+                    setCreateForm((f) => ({
+                      ...f,
+                      tradeType: newType,
+                      symbols: [defaultPair],
+                    }));
+                  }}
                 />
               </div>
               <div>
                 <label className="text-xs font-medium">通貨ペア</label>
-                <Input
+                <select
+                  multiple
+                  size={5}
                   value={createForm.symbols}
-                  onChange={(e) =>
-                    setCreateForm((f) => ({ ...f, symbols: e.target.value }))
-                  }
-                  placeholder="USD_JPY,EUR_JPY"
-                />
+                  onChange={(e) => {
+                    const selected = Array.from(
+                      e.target.selectedOptions,
+                      (opt) => opt.value
+                    );
+                    setCreateForm((f) => ({
+                      ...f,
+                      symbols: selected.length > 0 ? selected : f.symbols,
+                    }));
+                  }}
+                  className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                >
+                  {getPairOptions(createForm.tradeType).map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Ctrl/Cmd+クリックで複数選択可
+                </p>
               </div>
               <div>
                 <label className="text-xs font-medium">資金(円)</label>

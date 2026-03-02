@@ -34,6 +34,8 @@ class Position(Base):
     break_even_applied: Mapped[bool | None] = mapped_column(Boolean, default=False)
     trail_active: Mapped[bool | None] = mapped_column(Boolean, default=False)
     trail_price: Mapped[float | None] = mapped_column(Numeric(20, 8))
+    sl_order_id: Mapped[str | None] = mapped_column(String(100))
+    tp_order_id: Mapped[str | None] = mapped_column(String(100))
     opened_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     execution_id: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(

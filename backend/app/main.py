@@ -148,6 +148,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
     """Catch-all for unhandled exceptions."""
+    logger.error("Unhandled exception on %s %s: %s", request.method, request.url.path, exc, exc_info=True)
     return JSONResponse(
         status_code=500,
         content={

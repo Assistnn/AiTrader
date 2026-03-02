@@ -105,17 +105,17 @@ async def update_safeguard_config(
             stage="safeguard",
             config_before=old_config,
             config_after=config.config_json,
-            changed_by="user",
+            changed_by=user.id,
             change_reason="Safeguard config updated via API",
         )
         db.add(change)
 
     await db.flush()
-    await db.commit()
+    await db.refresh(config)
 
     # Notify running engine via ConfigEventBus (16書§7-2)
-    engine_manager = request.app.state.engine_manager
     try:
+        engine_manager = request.app.state.engine_manager
         await engine_manager.reload_config(
             trader_id=trader_id,
             config_type="safeguard",

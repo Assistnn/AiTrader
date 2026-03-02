@@ -34,6 +34,7 @@ from app.services.engine.market_data_feed import MarketDataFeed
 from app.services.engine.config_event_bus import ConfigEventBus, ConfigChangeEvent
 from app.services.engine.position_sync import PositionSyncService
 from app.config import settings
+from app.db.session import async_session_factory
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +82,10 @@ class TradeExecutionEngine:
         trader_config: dict | None = None,
         indicator_engine: IndicatorEngine | None = None,
         state_builder: StateBuilder | None = None,
+        user_id: int = 0,
     ) -> None:
         self.trader_id = trader_id
+        self.user_id = user_id
         self.pair = pair
         self.exchange = exchange
         self.data_provider = data_provider
@@ -149,6 +152,9 @@ class TradeExecutionEngine:
                     )
         except Exception:
             logger.exception("Engine[%d] warmup error", self.trader_id)
+
+        # Restore SL/TP state from DB and reconcile with exchange
+        await self._restore_and_reconcile()
 
         logger.info("Engine[%d] warmup completed", self.trader_id)
 
@@ -356,6 +362,11 @@ class TradeExecutionEngine:
                             entry_price=exec_result.order.filled_price or 0.0,
                         )
                         self._position_sync.register_position(new_pos)
+                        # Persist position with SL/TP to DB (SL/TP永続化)
+                        await self._persist_new_position(
+                            exec_result=exec_result,
+                            proposed_order=result.order,
+                        )
                 else:
                     logger.warning(
                         "Engine[%d] entry failed: %s",
@@ -416,6 +427,7 @@ class TradeExecutionEngine:
                         self.trader_id, pos.position_id,
                     )
                     self._position_sync.unregister_position(pos.position_id)
+                    await self._delete_position_from_db(pos.position_id)
 
         elif action == "PARTIAL":
             partial_pct = m4_output.result.get("partialPct", 0.5)
@@ -432,12 +444,18 @@ class TradeExecutionEngine:
 
         elif action == "ADJUST_TRAIL":
             new_sl = m4_output.result.get("newSlPrice")
+            break_even = m4_output.result.get("breakEvenApplied", False)
             if new_sl is not None:
                 log_with_data(logger, logging.INFO, "Adjusting trail SL", {
                     "trader_id": self.trader_id, "new_sl_price": new_sl,
                 })
                 for pos in positions:
                     await self.execution_engine.adjust_stop_loss(pos, new_sl)
+                    await self._update_position_sl_tp(
+                        pos.position_id, sl_price=new_sl,
+                        break_even_applied=break_even or None,
+                        trail_active=True,
+                    )
 
         elif action == "ADJUST_SL":
             new_sl = m4_output.result.get("newSlPrice")
@@ -447,6 +465,9 @@ class TradeExecutionEngine:
                 })
                 for pos in positions:
                     await self.execution_engine.adjust_stop_loss(pos, new_sl)
+                    await self._update_position_sl_tp(
+                        pos.position_id, sl_price=new_sl,
+                    )
             else:
                 logger.warning(
                     "Engine[%d] ADJUST_SL without newSlPrice", self.trader_id,
@@ -460,6 +481,9 @@ class TradeExecutionEngine:
                 })
                 for pos in positions:
                     await self.execution_engine.adjust_take_profit(pos, new_tp)
+                    await self._update_position_sl_tp(
+                        pos.position_id, tp_price=new_tp,
+                    )
             else:
                 logger.warning(
                     "Engine[%d] ADJUST_TP without newTpPrice", self.trader_id,
@@ -540,7 +564,7 @@ class TradeExecutionEngine:
                     )
                     # UNKNOWN_POSITION: attempt SL/TP recovery (監査指摘2)
                     if d.divergence_type.value == "UNKNOWN_POSITION":
-                        self._recover_sl_tp_for_unknown(d.position_id, d.pair)
+                        await self._recover_sl_tp_for_unknown(d.position_id, d.pair)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -548,29 +572,305 @@ class TradeExecutionEngine:
                     "Engine[%d] position sync error", self.trader_id,
                 )
 
-    def _recover_sl_tp_for_unknown(self, position_id: str, pair: str) -> None:
-        """Attempt to recover SL/TP for an unknown position (監査指摘2).
+    async def _recover_sl_tp_for_unknown(self, position_id: str, pair: str) -> None:
+        """Recover SL/TP for an unknown position (監査指摘2).
 
-        Checks if the execution engine's watchlist has SL/TP data for
-        this position. If found, logs recovery; if not, adds a
-        watchlist entry with no SL/TP as a tracking placeholder.
+        Creates a DB Position row with default SL/TP and adds to watchlist.
         """
+        from app.models.position import Position
+        from sqlalchemy import select
+
         watchlist = self.execution_engine._sl_tp_watchlist
         if position_id in watchlist:
             entry = watchlist[position_id]
             logger.info(
-                "Engine[%d] SL/TP recovered for unknown position %s: "
-                "sl=%.5f tp=%s",
-                self.trader_id,
-                position_id,
-                entry.get("sl_price") or 0,
-                entry.get("tp_price"),
+                "Engine[%d] SL/TP already in watchlist for %s: sl=%.5f tp=%s",
+                self.trader_id, position_id,
+                entry.get("sl_price") or 0, entry.get("tp_price"),
             )
+            return
+
+        # Fetch position details from exchange
+        try:
+            ex_positions = await self.exchange.get_positions()
+        except Exception:
+            logger.exception("Engine[%d] failed to fetch positions for recovery", self.trader_id)
+            return
+
+        ex_pos = next((p for p in ex_positions if p.position_id == position_id), None)
+        if ex_pos is None:
+            logger.warning("Engine[%d] position %s not found on exchange", self.trader_id, position_id)
+            return
+
+        # Default SL/TP: fixed 30 pips (conservative fallback)
+        default_sl_pips = self.trader_config.get("defaultRecoverSlPips", 30.0)
+        pip_unit = 0.01 if "JPY" in pair.upper() or "_" in pair else 0.00001
+        if ex_pos.side == "BUY":
+            default_sl = ex_pos.entry_price - default_sl_pips * pip_unit
+            default_tp = None  # No TP for recovered positions
         else:
-            logger.warning(
-                "Engine[%d] unknown position %s (%s) has no SL/TP in "
-                "watchlist — manual review recommended",
-                self.trader_id,
-                position_id,
-                pair,
+            default_sl = ex_pos.entry_price + default_sl_pips * pip_unit
+            default_tp = None
+
+        # Add to watchlist
+        self.execution_engine._sl_tp_watchlist[position_id] = {
+            "pair": pair,
+            "entry_price": ex_pos.entry_price,
+            "sl_price": default_sl,
+            "tp_price": default_tp,
+            "side": ex_pos.side,
+            "amount": ex_pos.amount,
+        }
+
+        # Persist to DB
+        try:
+            async with async_session_factory() as db:
+                existing = await db.execute(
+                    select(Position).where(
+                        Position.trader_id == self.trader_id,
+                        Position.exchange_position_id == position_id,
+                    )
+                )
+                if existing.scalar_one_or_none() is None:
+                    pos = Position(
+                        user_id=self.user_id,
+                        trader_id=self.trader_id,
+                        exchange_position_id=position_id,
+                        pair=pair,
+                        side=ex_pos.side,
+                        amount=ex_pos.amount,
+                        entry_price=ex_pos.entry_price,
+                        sl_price=default_sl,
+                        tp_price=default_tp,
+                        opened_at=datetime.now(timezone.utc),
+                    )
+                    db.add(pos)
+                    await db.commit()
+                    logger.warning(
+                        "Engine[%d] UNKNOWN position %s registered with default SL=%.5f",
+                        self.trader_id, position_id, default_sl,
+                    )
+        except Exception:
+            logger.exception("Engine[%d] DB persist failed for recovered position", self.trader_id)
+
+    # ---- DB persistence helpers (SL/TP永続化) ----
+
+    async def _persist_new_position(
+        self, exec_result: Any, proposed_order: Any,
+    ) -> None:
+        """Persist new position with SL/TP to DB after entry."""
+        from app.models.position import Position
+
+        order = exec_result.order
+        if order is None:
+            return
+
+        try:
+            # Get SL/TP order IDs from ExecutionEngine
+            sl_order_id = None
+            tp_order_id = None
+            sl_price = getattr(proposed_order, "sl_price", None)
+            tp_price = getattr(proposed_order, "tp_price", None)
+
+            if hasattr(self.execution_engine, "_sl_order_ids") and isinstance(
+                self.execution_engine._sl_order_ids, dict
+            ):
+                sl_order_id = self.execution_engine._sl_order_ids.get(order.order_id)
+            if hasattr(self.execution_engine, "_sl_tp_watchlist") and isinstance(
+                self.execution_engine._sl_tp_watchlist, dict
+            ):
+                watchlist_entry = self.execution_engine._sl_tp_watchlist.get(order.order_id)
+                if watchlist_entry and isinstance(watchlist_entry, dict):
+                    sl_price = watchlist_entry.get("sl_price", sl_price)
+                    tp_price = watchlist_entry.get("tp_price", tp_price)
+
+            tp_order_id = getattr(exec_result, "tp_order_id", None)
+
+            async with async_session_factory() as db:
+                pos = Position(
+                    user_id=self.user_id,
+                    trader_id=self.trader_id,
+                    exchange_position_id=order.order_id,
+                    pair=proposed_order.pair,
+                    side=proposed_order.side,
+                    amount=order.filled_amount or proposed_order.amount,
+                    entry_price=order.filled_price or 0.0,
+                    sl_price=sl_price,
+                    tp_price=tp_price,
+                    sl_order_id=sl_order_id,
+                    tp_order_id=tp_order_id,
+                    opened_at=datetime.now(timezone.utc),
+                )
+                db.add(pos)
+                await db.commit()
+                logger.info(
+                    "Engine[%d] position persisted: %s sl=%.5f tp=%s",
+                    self.trader_id, order.order_id,
+                    sl_price or 0, tp_price,
+                )
+        except Exception:
+            logger.exception("Engine[%d] failed to persist position to DB", self.trader_id)
+
+    async def _update_position_sl_tp(
+        self,
+        position_id: str,
+        sl_price: float | None = None,
+        tp_price: float | None = None,
+        break_even_applied: bool | None = None,
+        trail_active: bool | None = None,
+    ) -> None:
+        """Update SL/TP prices in DB for an existing position."""
+        from app.models.position import Position
+        from sqlalchemy import select
+
+        try:
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(Position).where(
+                        Position.trader_id == self.trader_id,
+                        Position.exchange_position_id == position_id,
+                    )
+                )
+                pos = result.scalar_one_or_none()
+                if pos is None:
+                    logger.warning(
+                        "Engine[%d] position %s not in DB for SL/TP update",
+                        self.trader_id, position_id,
+                    )
+                    return
+                if sl_price is not None:
+                    pos.sl_price = sl_price
+                if tp_price is not None:
+                    pos.tp_price = tp_price
+                if break_even_applied is not None:
+                    pos.break_even_applied = break_even_applied
+                if trail_active is not None:
+                    pos.trail_active = trail_active
+                await db.commit()
+                logger.debug(
+                    "Engine[%d] position %s SL/TP updated in DB",
+                    self.trader_id, position_id,
+                )
+        except Exception:
+            logger.exception("Engine[%d] failed to update position SL/TP in DB", self.trader_id)
+
+    async def _delete_position_from_db(self, position_id: str) -> None:
+        """Delete closed position from DB."""
+        from app.models.position import Position
+        from sqlalchemy import select
+
+        try:
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(Position).where(
+                        Position.trader_id == self.trader_id,
+                        Position.exchange_position_id == position_id,
+                    )
+                )
+                pos = result.scalar_one_or_none()
+                if pos is not None:
+                    await db.delete(pos)
+                    await db.commit()
+                    logger.info(
+                        "Engine[%d] position %s removed from DB",
+                        self.trader_id, position_id,
+                    )
+        except Exception:
+            logger.exception("Engine[%d] failed to delete position from DB", self.trader_id)
+
+    async def _restore_and_reconcile(self) -> None:
+        """Restore SL/TP state from DB and reconcile with exchange.
+
+        Called during warmup. Ensures watchlist is rebuilt from DB,
+        then cross-referenced with exchange positions.
+        """
+        from app.models.position import Position
+        from sqlalchemy import select
+
+        # Phase 1: Restore watchlist from DB
+        restored_count = 0
+        try:
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(Position).where(Position.trader_id == self.trader_id)
+                )
+                db_positions = result.scalars().all()
+
+                for pos in db_positions:
+                    key = pos.exchange_position_id or str(pos.id)
+                    # Restore watchlist entry
+                    if pos.sl_price or pos.tp_price:
+                        self.execution_engine._sl_tp_watchlist[key] = {
+                            "pair": pos.pair,
+                            "entry_price": float(pos.entry_price),
+                            "sl_price": float(pos.sl_price) if pos.sl_price else None,
+                            "tp_price": float(pos.tp_price) if pos.tp_price else None,
+                            "side": pos.side,
+                            "amount": float(pos.amount),
+                        }
+                        restored_count += 1
+                    # Restore OCO order ID mapping (GMO FX)
+                    if pos.sl_order_id:
+                        self.execution_engine._sl_order_ids[key] = pos.sl_order_id
+        except Exception:
+            logger.exception("Engine[%d] failed to restore watchlist from DB", self.trader_id)
+            return
+
+        if restored_count > 0:
+            logger.info(
+                "Engine[%d] restored %d watchlist entries from DB",
+                self.trader_id, restored_count,
             )
+
+        # Phase 2: Reconcile with exchange
+        try:
+            exchange_positions = await self.exchange.get_positions()
+        except Exception:
+            logger.warning(
+                "Engine[%d] reconciliation: exchange fetch failed, using DB state only",
+                self.trader_id,
+            )
+            return
+
+        exchange_ids = {p.position_id for p in exchange_positions}
+
+        try:
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(Position).where(Position.trader_id == self.trader_id)
+                )
+                db_positions = result.scalars().all()
+                db_id_map = {p.exchange_position_id: p for p in db_positions}
+
+                # Case A: DB has, exchange doesn't → closed externally → clean up
+                removed = 0
+                for db_pos in db_positions:
+                    if db_pos.exchange_position_id and db_pos.exchange_position_id not in exchange_ids:
+                        logger.warning(
+                            "Engine[%d] reconcile: position %s closed externally, removing",
+                            self.trader_id, db_pos.exchange_position_id,
+                        )
+                        self.execution_engine.remove_from_watchlist(db_pos.exchange_position_id)
+                        await db.delete(db_pos)
+                        removed += 1
+
+                # Case B: Exchange has, DB doesn't → UNKNOWN → register
+                registered = 0
+                for ex_pos in exchange_positions:
+                    if ex_pos.position_id not in db_id_map:
+                        logger.critical(
+                            "Engine[%d] reconcile: UNKNOWN position %s on exchange",
+                            self.trader_id, ex_pos.position_id,
+                        )
+                        # Will be handled by _recover_sl_tp_for_unknown in sync loop
+                        registered += 1
+
+                await db.commit()
+
+                if removed > 0 or registered > 0:
+                    logger.info(
+                        "Engine[%d] reconciliation: removed=%d, unknown=%d",
+                        self.trader_id, removed, registered,
+                    )
+        except Exception:
+            logger.exception("Engine[%d] reconciliation failed", self.trader_id)

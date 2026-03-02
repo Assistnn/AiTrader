@@ -411,7 +411,7 @@ class ExecutionEngine:
         """
         if self.trade_type == "crypto":
             # bitbank: system-side watchlist (§9-4)
-            return self._add_to_watchlist(
+            return await self._add_to_watchlist(
                 filled_order=filled_order,
                 proposed_order=proposed_order,
                 lot_size=lot_size,
@@ -491,7 +491,7 @@ class ExecutionEngine:
 
         # Fallback: if SL placement failed, add to watchlist (§9-2 failsafe)
         if sl_order_id is None and proposed_order.sl_price is not None:
-            self._add_to_watchlist(
+            await self._add_to_watchlist(
                 filled_order=filled_order,
                 proposed_order=proposed_order,
                 lot_size=lot_size,
@@ -508,7 +508,7 @@ class ExecutionEngine:
 
         return tp_order_id, sl_order_id
 
-    def _add_to_watchlist(
+    async def _add_to_watchlist(
         self,
         filled_order: Order,
         proposed_order: ProposedOrder,
@@ -517,8 +517,26 @@ class ExecutionEngine:
         """Add position to system-side SL/TP watchlist (§9-4).
 
         Used for bitbank (no native SL/TP) and as GMO OCO failure fallback.
+        Resolves actual exchange position_id for correct check_sl_tp matching.
         """
-        self._sl_tp_watchlist[filled_order.order_id] = {
+        # Determine position key: try to get actual exchange position_id
+        position_key = filled_order.order_id  # fallback
+        try:
+            positions = await self.exchange.get_positions()
+            for pos in positions:
+                if (
+                    pos.pair == proposed_order.pair
+                    and pos.side.value == proposed_order.side
+                    and pos.position_id not in self._sl_tp_watchlist
+                ):
+                    position_key = pos.position_id
+                    break
+        except Exception:
+            logger.warning(
+                "Failed to resolve position_id for watchlist, using order_id"
+            )
+
+        self._sl_tp_watchlist[position_key] = {
             "pair": proposed_order.pair,
             "entry_price": filled_order.filled_price,
             "tp_price": proposed_order.tp_price,
@@ -527,8 +545,8 @@ class ExecutionEngine:
             "amount": lot_size,
         }
         logger.info(
-            "Watchlist added: order=%s pair=%s sl=%.5f tp=%s",
-            filled_order.order_id,
+            "Watchlist added: key=%s pair=%s sl=%.5f tp=%s",
+            position_key,
             proposed_order.pair,
             proposed_order.sl_price or 0,
             proposed_order.tp_price,
@@ -553,6 +571,9 @@ class ExecutionEngine:
         current_price = ticker.last
         to_remove: list[str] = []
 
+        # Pre-fetch positions once (avoid N+1 exchange calls)
+        exchange_positions = None
+
         for position_key, watch in list(self._sl_tp_watchlist.items()):
             if watch["pair"] != pair:
                 continue
@@ -572,30 +593,45 @@ class ExecutionEngine:
             if sl_hit or tp_hit:
                 reason = "SL" if sl_hit else "TP"
                 logger.info(
-                    "Watchlist %s hit for %s: price=%.5f %s=%.5f",
-                    reason, pair, current_price,
+                    "Watchlist %s hit for %s (key=%s): price=%.5f %s=%.5f",
+                    reason, pair, position_key, current_price,
                     reason, sl_price if sl_hit else tp_price,
                 )
 
-                # Find and close the position
+                # Find and close the position (match by position_id)
                 try:
-                    positions = await self.exchange.get_positions()
-                    for pos in positions:
-                        if pos.pair == pair:
-                            order = await self.exchange.close_position(
-                                position_id=pos.position_id,
-                                amount=watch["amount"],
-                            )
-                            filled = await self._wait_for_fill(order.order_id)
-                            results.append(ExecutionResult(
-                                order=filled,
-                                success=filled.status == OrderStatus.FILLED,
-                                error=None if filled.status == OrderStatus.FILLED
-                                else f"Watchlist {reason} close failed",
-                                _debug={"trigger": reason, "watchlist_key": position_key},
-                            ))
-                            to_remove.append(position_key)
+                    if exchange_positions is None:
+                        exchange_positions = await self.exchange.get_positions()
+
+                    # Match by position_id (= watchlist key), not just pair
+                    matched_pos = None
+                    for pos in exchange_positions:
+                        if pos.position_id == position_key:
+                            matched_pos = pos
                             break
+
+                    if matched_pos is None:
+                        # Position no longer exists on exchange (external close)
+                        logger.warning(
+                            "Watchlist %s: position %s not found on exchange, removing",
+                            reason, position_key,
+                        )
+                        to_remove.append(position_key)
+                        continue
+
+                    order = await self.exchange.close_position(
+                        position_id=matched_pos.position_id,
+                        amount=watch["amount"],
+                    )
+                    filled = await self._wait_for_fill(order.order_id)
+                    results.append(ExecutionResult(
+                        order=filled,
+                        success=filled.status == OrderStatus.FILLED,
+                        error=None if filled.status == OrderStatus.FILLED
+                        else f"Watchlist {reason} close failed",
+                        _debug={"trigger": reason, "watchlist_key": position_key},
+                    ))
+                    to_remove.append(position_key)
                 except Exception as e:
                     logger.exception("Watchlist close failed for %s", position_key)
                     results.append(ExecutionResult(
@@ -606,10 +642,12 @@ class ExecutionEngine:
         for key in to_remove:
             self._sl_tp_watchlist.pop(key, None)
 
-        log_with_data(logger, logging.INFO, "Close all positions completed", {
-            "position_count": len(results),
-            "success_count": sum(1 for r in results if r.success),
-        })
+        if results:
+            log_with_data(logger, logging.INFO, "Watchlist SL/TP check completed", {
+                "pair": pair,
+                "triggered_count": len(results),
+                "success_count": sum(1 for r in results if r.success),
+            })
         return results
 
     def remove_from_watchlist(self, position_key: str) -> None:

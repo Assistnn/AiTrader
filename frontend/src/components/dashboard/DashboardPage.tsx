@@ -6,6 +6,7 @@ import { MarketWatch } from "@/components/dashboard/MarketWatch";
 import { TraderSidebar } from "@/components/dashboard/TraderSidebar";
 import { ActionButtons } from "@/components/dashboard/ActionButtons";
 import { ChartPanel } from "@/components/dashboard/ChartPanel";
+import { RecentTrades } from "@/components/dashboard/RecentTrades";
 import { useDashboardSummary } from "@/hooks/useDashboard";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useAuthStore } from "@/stores/authStore";
@@ -30,17 +31,18 @@ export function DashboardPage() {
           </p>
         )}
         {summary && (
-          <div className="grid h-[calc(100vh-3.5rem)] grid-cols-[280px_1fr_320px]">
+          <div className="grid min-h-[calc(100vh-3.5rem)] grid-cols-[280px_1fr_320px]">
             {/* Left: MarketWatch */}
             <aside className="overflow-y-auto border-r p-4">
               <MarketWatch />
             </aside>
 
-            {/* Center: Summary + Actions + Chart */}
-            <div className="flex flex-col gap-4 overflow-y-auto p-4">
+            {/* Center: Summary + Actions + Chart + Recent Trades */}
+            <div className="flex flex-col gap-4 p-4">
               <SummaryCards summary={summary} />
               <ActionButtons />
               <ChartPanel />
+              <RecentTrades />
             </div>
 
             {/* Right: Trader Sidebar */}

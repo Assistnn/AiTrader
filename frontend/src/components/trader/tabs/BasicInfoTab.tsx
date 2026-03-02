@@ -3,6 +3,7 @@
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import type { Trader } from "@/types/api";
+import { getPairOptions } from "@/constants/pairs";
 
 interface BasicInfoTabProps {
   trader: Trader;
@@ -14,22 +15,8 @@ const tradeTypeOptions = [
   { value: "crypto", label: "仮想通貨" },
 ];
 
-const fxPairs = [
-  { value: "USD_JPY", label: "USD/JPY" },
-  { value: "EUR_JPY", label: "EUR/JPY" },
-  { value: "GBP_JPY", label: "GBP/JPY" },
-  { value: "EUR_USD", label: "EUR/USD" },
-];
-
-const cryptoPairs = [
-  { value: "BTC_JPY", label: "BTC/JPY" },
-  { value: "ETH_JPY", label: "ETH/JPY" },
-  { value: "XRP_JPY", label: "XRP/JPY" },
-];
-
 export function BasicInfoTab({ trader, onChange }: BasicInfoTabProps) {
-  const isFx = trader.tradeType === "FX" || trader.tradeType === "fx";
-  const pairOptions = isFx ? fxPairs : cryptoPairs;
+  const pairOptions = getPairOptions(trader.tradeType);
   const primaryPair = trader.symbols?.[0] || "";
 
   return (

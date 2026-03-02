@@ -42,7 +42,7 @@ async def update_account(
     for field, value in update_data.items():
         setattr(user, field, value)
     await db.flush()
-    await db.commit()
+    await db.refresh(user)
 
     return ok(AccountResponse(
         id=user.id,

@@ -142,17 +142,20 @@ async def update_model_stage(
             stage=stage,
             config_before=old_config,
             config_after=config.config_json,
-            changed_by="user",
+            changed_by=user.id,
             change_reason="Model stage config updated via API",
         )
         db.add(change)
 
+    change = locals().get("change")
     await db.flush()
-    await db.commit()
+    await db.refresh(config)
+    if change is not None:
+        await db.refresh(change)
 
     # Notify running engine via ConfigEventBus (16書§7-2)
-    engine_manager = request.app.state.engine_manager
     try:
+        engine_manager = request.app.state.engine_manager
         await engine_manager.reload_config(
             trader_id=trader_id,
             config_type="model_stage",
@@ -172,7 +175,7 @@ async def update_model_stage(
             updated_at=config.updated_at,
         ).model_dump(by_alias=True, mode="json"),
         "configChange": {
-            "id": change.id if 'change' in dir() else None,
+            "id": change.id if change is not None else None,
             "changedAt": config.updated_at.isoformat() if config.updated_at else None,
         },
     })

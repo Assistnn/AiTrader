@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     BITBANK_WS_URL: str = "wss://stream.bitbank.cc/socket.io/"
 
     # --- CORS ---
-    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://162.43.56.158:3000"]
 
     # --- Logging ---
     LOG_LEVEL: str = "INFO"
