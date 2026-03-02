@@ -72,9 +72,21 @@ echo [OK] Backend service restarted.
 echo.
 
 REM ------------------------------------------
-REM  Step 5: Frontend - npm install + build
+REM  Step 5: Frontend - ensure .env.local
 REM ------------------------------------------
-echo [5/7] Building frontend...
+echo [5/8] Ensuring frontend .env.local...
+if not exist %ROOT%\frontend\.env.local (
+    echo NEXT_PUBLIC_API_URL=http://162.43.56.158:8000> %ROOT%\frontend\.env.local
+    echo [OK] Created .env.local
+) else (
+    echo [OK] .env.local already exists
+)
+echo.
+
+REM ------------------------------------------
+REM  Step 6: Frontend - npm install + build
+REM ------------------------------------------
+echo [6/8] Building frontend...
 cd /d %ROOT%\frontend
 call %NPM% install --production=false --quiet 2>nul
 if errorlevel 1 (
@@ -91,7 +103,7 @@ echo.
 REM ------------------------------------------
 REM  Step 6: Setup standalone output
 REM ------------------------------------------
-echo [6/7] Setting up standalone output...
+echo [7/8] Setting up standalone output...
 cd /d %ROOT%\frontend
 
 REM Copy server.js from standalone to frontend root
@@ -109,7 +121,7 @@ echo.
 REM ------------------------------------------
 REM  Step 7: Restart Frontend
 REM ------------------------------------------
-echo [7/7] Restarting frontend service...
+echo [8/8] Restarting frontend service...
 %NSSM% restart AiTradingFrontend
 if errorlevel 1 (
     echo [WARN] Frontend restart returned non-zero, checking status...
