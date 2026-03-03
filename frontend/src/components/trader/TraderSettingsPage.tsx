@@ -10,7 +10,8 @@ import { MXTab } from "@/components/trader/tabs/MXTab";
 import { SafeguardTab } from "@/components/trader/tabs/SafeguardTab";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Plus, Trash2 } from "lucide-react";
+import { Play, Plus, Square, Trash2 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { useTraders } from "@/hooks/useDashboard";
 import type { Trader } from "@/types/api";
 import { apiClient } from "@/lib/api";
@@ -46,6 +47,7 @@ export function TraderSettingsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [toggling, setToggling] = useState(false);
   const [createForm, setCreateForm] = useState({
     traderName: "",
     tradeType: "FX",
@@ -153,6 +155,20 @@ export function TraderSettingsPage() {
       // Error handled by apiClient
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleToggle = async () => {
+    if (!selected) return;
+    const action = selected.status === "running" ? "stop" : "start";
+    setToggling(true);
+    try {
+      await apiClient.post(`/api/v1/traders/${selected.id}/${action}`);
+      await mutate();
+    } catch {
+      alert(`${action === "start" ? "開始" : "停止"}に失敗しました`);
+    } finally {
+      setToggling(false);
     }
   };
 
@@ -283,8 +299,48 @@ export function TraderSettingsPage() {
           ) : (
             <div className="max-w-[900px]">
               <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-lg font-semibold">{merged.traderName}</h2>
+                <div className="flex items-center gap-3">
+                  <h2 className="text-lg font-semibold">{merged.traderName}</h2>
+                  <Badge
+                    variant={
+                      merged.status === "running"
+                        ? "success"
+                        : merged.status === "error" || merged.status === "halted"
+                          ? "destructive"
+                          : "secondary"
+                    }
+                  >
+                    {merged.status === "running"
+                      ? "稼働中"
+                      : merged.status === "error"
+                        ? "エラー"
+                        : merged.status === "halted"
+                          ? "停止(HALT)"
+                          : "停止中"}
+                  </Badge>
+                </div>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={handleToggle}
+                    disabled={toggling}
+                    className={
+                      merged.status === "running"
+                        ? "text-destructive hover:bg-destructive/10"
+                        : "text-green-600 hover:bg-green-50"
+                    }
+                  >
+                    {merged.status === "running" ? (
+                      <Square className="mr-1.5 h-4 w-4" />
+                    ) : (
+                      <Play className="mr-1.5 h-4 w-4" />
+                    )}
+                    {toggling
+                      ? "処理中..."
+                      : merged.status === "running"
+                        ? "停止"
+                        : "開始"}
+                  </Button>
                   <Button
                     variant="outline"
                     onClick={handleDelete}
