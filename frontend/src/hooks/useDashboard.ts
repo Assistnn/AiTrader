@@ -11,12 +11,18 @@ import type { DashboardSummary, Trader, TradeRecord, PaginatedResponse } from "@
 export function useDashboardSummary() {
   return useSWR<DashboardSummary>("/api/v1/dashboard/summary", fetcher, {
     refreshInterval: 5000,
+    keepPreviousData: true,
+    revalidateOnFocus: false,
+    dedupingInterval: 3000,
   });
 }
 
 /** Trader list (full detail). */
 export function useTraders() {
-  return useSWR<Trader[]>("/api/v1/traders", fetcher);
+  return useSWR<Trader[]>("/api/v1/traders", fetcher, {
+    keepPreviousData: true,
+    revalidateOnFocus: false,
+  });
 }
 
 /** Trade history with pagination metadata. */

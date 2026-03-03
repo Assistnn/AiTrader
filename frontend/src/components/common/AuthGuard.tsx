@@ -11,12 +11,16 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { isAuthenticated, accessToken, loadFromStorage } = useAuthStore();
-  const [ready, setReady] = useState(false);
 
-  useEffect(() => {
-    loadFromStorage();
-    setReady(true);
-  }, [loadFromStorage]);
+  // Synchronously load tokens during useState initialization to avoid
+  // an extra render frame (useEffect would cause spinner → content flash).
+  const [ready] = useState(() => {
+    if (typeof window !== "undefined") {
+      loadFromStorage();
+      return true;
+    }
+    return false;
+  });
 
   // Sync token to apiClient whenever it changes
   useEffect(() => {

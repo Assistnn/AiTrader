@@ -79,31 +79,28 @@ async def get_dashboard_summary(
     )
     total_pnl_month = (await db.execute(month_pnl_q)).scalar() or 0
 
-    # Batch: latest pipeline logs per trader (M1, M2)
+    # Batch: latest pipeline logs per trader (M1+M2 in single query)
     pipeline_states: dict[int, dict] = {}
     if trader_ids:
-        for stage in ["m1", "m2"]:
-            sub = (
-                select(
-                    PipelineLog.trader_id,
-                    func.max(PipelineLog.id).label("max_id"),
-                )
-                .where(
-                    PipelineLog.user_id == user.id,
-                    PipelineLog.stage == stage,
-                )
-                .group_by(PipelineLog.trader_id)
-                .subquery()
+        sub = (
+            select(
+                PipelineLog.trader_id,
+                PipelineLog.stage,
+                func.max(PipelineLog.id).label("max_id"),
             )
-            log_q = select(PipelineLog).join(
-                sub, PipelineLog.id == sub.c.max_id
+            .where(
+                PipelineLog.user_id == user.id,
+                PipelineLog.stage.in_(["m1", "m2"]),
             )
-            for log in (await db.execute(log_q)).scalars().all():
-                tid = log.trader_id
-                if tid not in pipeline_states:
-                    pipeline_states[tid] = {}
-                key = "lastM1" if stage == "m1" else "lastM2"
-                pipeline_states[tid][key] = log.output_snapshot
+            .group_by(PipelineLog.trader_id, PipelineLog.stage)
+            .subquery()
+        )
+        log_q = select(PipelineLog).join(
+            sub, PipelineLog.id == sub.c.max_id
+        )
+        for log in (await db.execute(log_q)).scalars().all():
+            key = "lastM1" if log.stage == "m1" else "lastM2"
+            pipeline_states.setdefault(log.trader_id, {})[key] = log.output_snapshot
 
     # Batch: latest safeguard state per trader
     guard_states: dict[int, dict] = {}
