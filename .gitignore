@@ -50,3 +50,7 @@ postgres_data/
 
 # Serena MCP
 .serena/
+
+# Deploy scripts (contain VPS credentials/paths)
+deploy-remote.sh
+deploy.bat
