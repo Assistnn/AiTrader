@@ -55,7 +55,7 @@ class TraderCreateRequest(BaseModel):
     symbols: list[str]
     capital_jpy: float = Field(alias="capitalJpy")
     order_unit_lots: float = Field(alias="orderUnitLots")
-    strategy_text: str | None = Field(None, alias="strategyText")
+    strategy_text: str | None = Field(None, alias="strategyText", max_length=2000)
     notify_email: str | None = Field(None, alias="notifyEmail")
     notify_on_entry: bool = Field(True, alias="notifyOnEntry")
     notify_on_stop: bool = Field(True, alias="notifyOnStop")
@@ -84,7 +84,7 @@ class TraderUpdateRequest(BaseModel):
     symbols: list[str] | None = None
     capital_jpy: float | None = Field(None, alias="capitalJpy")
     order_unit_lots: float | None = Field(None, alias="orderUnitLots")
-    strategy_text: str | None = Field(None, alias="strategyText")
+    strategy_text: str | None = Field(None, alias="strategyText", max_length=2000)
     notify_email: str | None = Field(None, alias="notifyEmail")
     notify_on_entry: bool | None = Field(None, alias="notifyOnEntry")
     notify_on_stop: bool | None = Field(None, alias="notifyOnStop")

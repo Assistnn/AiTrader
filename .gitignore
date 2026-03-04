@@ -54,3 +54,6 @@ postgres_data/
 # Deploy scripts (contain VPS credentials/paths)
 deploy-remote.sh
 deploy.bat
+
+# VPS info files (sensitive)
+VPS情報*
