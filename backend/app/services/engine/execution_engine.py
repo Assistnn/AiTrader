@@ -150,6 +150,17 @@ class ExecutionEngine:
                 client_order_id=client_order_id,
             )
 
+            # 4.5. Check for immediate rejection
+            if order.status == OrderStatus.REJECTED:
+                self._circuit_breaker.record_failure()
+                return ExecutionResult(
+                    order=order,
+                    size_result=size_result,
+                    success=False,
+                    error="Order rejected by exchange",
+                    _debug={"client_order_id": client_order_id},
+                )
+
             # 5. Poll for fill confirmation
             filled_order = await self._wait_for_fill(order.order_id)
 

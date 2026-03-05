@@ -100,12 +100,14 @@ class MockExchange(BaseExchange):
 
         ticker = self.current_prices.get(pair)
         if ticker is None:
-            return Order(
+            order = Order(
                 order_id=order_id, client_order_id=coid, pair=pair,
                 side=side, order_type=order_type, amount=amount,
                 price=price, status=OrderStatus.REJECTED,
                 created_at=now, updated_at=now,
             )
+            self.orders.append(order)
+            return order
 
         if order_type == OrderType.MARKET:
             # Immediate fill with slippage
