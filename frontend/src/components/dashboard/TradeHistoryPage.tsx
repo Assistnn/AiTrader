@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useTradeHistory } from "@/hooks/useDashboard";
-import { apiClient } from "@/lib/api";
+import { apiClient, API_BASE } from "@/lib/api";
 import { formatJpy, formatPips, formatDateJst } from "@/lib/utils";
 import type { TradeRecord } from "@/types/api";
 import type { StageResult } from "@/types/api";
@@ -110,7 +110,6 @@ export function TradeHistoryPage() {
 
   const handleCsvExport = async () => {
     try {
-      const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       const res = await fetch(`${API_BASE}/api/v1/history/export/csv`, {
         headers: { Authorization: `Bearer ${(apiClient as any).token || ""}` },
       });

@@ -29,14 +29,14 @@ class Settings(BaseSettings):
     TRADING_MODE: TradingMode = TradingMode.SIMULATION
 
     # --- Database ---
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/ai_trading"
+    DATABASE_URL: str = "postgresql+asyncpg://localhost:5432/ai_trading"
 
     # --- Security (11_セキュリティ.md Section 2-1, 7) ---
-    JWT_SECRET_KEY: str = "change-me-in-production"
+    JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_EXPIRE_MINUTES: int = 60  # 1 hour per design
     JWT_REFRESH_EXPIRE_DAYS: int = 7  # 7 days per design
-    MASTER_ENCRYPTION_KEY: str = "change-me-in-production"
+    MASTER_ENCRYPTION_KEY: str = ""
 
     # --- AI Integration (05_AI統合.md, 14_コスト管理.md) ---
     AI_DEFAULT_PROVIDER: str = "openai"
@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     BITBANK_WS_URL: str = "wss://stream.bitbank.cc/socket.io/"
 
     # --- CORS ---
-    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://162.43.56.158:3000"]
+    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
     # --- Logging ---
     LOG_LEVEL: str = "INFO"
@@ -103,6 +103,40 @@ class Settings(BaseSettings):
     def validate_trading_mode(cls, v: str) -> str:
         if isinstance(v, str):
             return v.lower()
+        return v
+
+    @field_validator("JWT_SECRET_KEY", mode="after")
+    @classmethod
+    def validate_jwt_secret(cls, v: str) -> str:
+        if v == "change-me-in-production":
+            raise ValueError(
+                "JWT_SECRET_KEY must be changed from default in .env"
+            )
+        if not v:
+            import os
+            if os.environ.get("TRADING_MODE", "").lower() != "backtest":
+                import warnings
+                warnings.warn(
+                    "JWT_SECRET_KEY is empty. Set it in .env for production.",
+                    stacklevel=2,
+                )
+        return v
+
+    @field_validator("MASTER_ENCRYPTION_KEY", mode="after")
+    @classmethod
+    def validate_master_key(cls, v: str) -> str:
+        if v == "change-me-in-production":
+            raise ValueError(
+                "MASTER_ENCRYPTION_KEY must be changed from default in .env"
+            )
+        if not v:
+            import os
+            if os.environ.get("TRADING_MODE", "").lower() != "backtest":
+                import warnings
+                warnings.warn(
+                    "MASTER_ENCRYPTION_KEY is empty. Set it in .env for production.",
+                    stacklevel=2,
+                )
         return v
 
     model_config = {
