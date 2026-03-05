@@ -130,6 +130,7 @@ class TraderListItem(BaseModel):
     id: int
     trader_name: str = Field(alias="traderName")
     trade_type: str = Field(alias="tradeType")
+    symbols: list[str]
     status: str
     capital_jpy: float = Field(alias="capitalJpy")
     created_at: datetime = Field(alias="createdAt")

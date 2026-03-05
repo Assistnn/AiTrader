@@ -37,6 +37,7 @@ export interface TraderListItem {
   id: number;
   traderName: string;
   tradeType: string;
+  symbols: string[];
   status: string;
   capitalJpy: number;
   createdAt: string;

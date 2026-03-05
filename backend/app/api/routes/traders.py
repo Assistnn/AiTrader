@@ -56,6 +56,7 @@ async def list_traders(
             id=t.id,
             trader_name=t.trader_name,
             trade_type=t.trade_type,
+            symbols=t.symbols or [],
             status=t.status,
             capital_jpy=float(t.capital_jpy),
             created_at=t.created_at,
