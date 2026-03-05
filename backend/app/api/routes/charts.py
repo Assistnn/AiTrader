@@ -5,13 +5,14 @@ Reference: 08_API仕様 Section 3-8
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.models.user import User
-from app.models.historical_ohlcv import HistoricalOhlcv
 from app.models.chart_config import ChartConfig
 from app.models.trade_history import TradeHistory
 from app.schemas.chart import (
@@ -23,6 +24,11 @@ from app.schemas.chart import (
 )
 from app.api.deps import get_current_user
 from app.api.response import ok
+from app.services.exchange.pair_normalizer import PairNormalizer
+from app.services.pipeline.bitbank_data_provider import BitbankDataProvider
+from app.services.pipeline.gmo_fx_data_provider import GmoFxDataProvider
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/charts", tags=["charts"])
 
@@ -32,32 +38,34 @@ async def get_ohlcv(
     pair: str = Query(...),
     timeframe: str = Query("H1"),
     limit: int = Query(200, ge=1, le=1000),
-    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """OHLCV データ取得."""
-    q = (
-        select(HistoricalOhlcv)
-        .where(
-            HistoricalOhlcv.pair == pair,
-            HistoricalOhlcv.timeframe == timeframe,
-        )
-        .order_by(HistoricalOhlcv.timestamp.desc())
-        .limit(limit)
-    )
-    result = await db.execute(q)
-    rows = result.scalars().all()
+    """OHLCV データ取得（取引所公開APIから直接取得）. Reference: 08_API仕様 §3-8"""
+    if PairNormalizer.is_crypto(pair):
+        provider = BitbankDataProvider()
+    elif PairNormalizer.is_fx(pair):
+        provider = GmoFxDataProvider()
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown pair: {pair}")
+
+    try:
+        bars = await provider.get_ohlcv(pair, timeframe, limit)
+    except (ValueError, RuntimeError) as e:
+        logger.warning("Failed to fetch OHLCV for %s %s: %s", pair, timeframe, e)
+        raise HTTPException(status_code=502, detail=str(e))
+    finally:
+        await provider.close()
 
     items = [
         OhlcvItem(
-            t=r.timestamp,
-            o=float(r.open),
-            h=float(r.high),
-            l=float(r.low),
-            c=float(r.close),
-            v=float(r.volume),
+            t=bar.timestamp,
+            o=bar.open,
+            h=bar.high,
+            l=bar.low,
+            c=bar.close,
+            v=bar.volume,
         )
-        for r in reversed(rows)
+        for bar in bars
     ]
 
     return ok(items)
