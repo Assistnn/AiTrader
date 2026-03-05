@@ -10,30 +10,36 @@ const PUBLIC_PATHS = ["/login"];
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { isAuthenticated, accessToken, loadFromStorage } = useAuthStore();
+  const { isAuthenticated, accessToken } = useAuthStore();
 
   // Synchronously load tokens during useState initialization to avoid
-  // an extra render frame (useEffect would cause spinner → content flash).
+  // an extra render frame. Also sync apiClient token immediately so
+  // child components can make authenticated API calls on first render.
   const [ready] = useState(() => {
     if (typeof window !== "undefined") {
-      loadFromStorage();
+      useAuthStore.getState().loadFromStorage();
+      const token = useAuthStore.getState().accessToken;
+      if (token) {
+        apiClient.setToken(token);
+      }
       return true;
     }
     return false;
   });
 
-  // Sync token to apiClient whenever it changes
+  // Keep apiClient token in sync when it changes (login/logout)
   useEffect(() => {
     apiClient.setToken(accessToken);
   }, [accessToken]);
 
   useEffect(() => {
     if (!ready) return;
+    const authed = useAuthStore.getState().isAuthenticated;
     const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
-    if (!isAuthenticated && !isPublic) {
+    if (!authed && !isPublic) {
       router.replace("/login");
     }
-    if (isAuthenticated && pathname === "/login") {
+    if (authed && pathname === "/login") {
       router.replace("/");
     }
   }, [ready, isAuthenticated, pathname, router]);
@@ -47,7 +53,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   }
 
   const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
-  if (!isAuthenticated && !isPublic) {
+  if (!useAuthStore.getState().isAuthenticated && !isPublic) {
     return null;
   }
 

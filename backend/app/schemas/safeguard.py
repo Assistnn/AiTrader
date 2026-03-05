@@ -19,8 +19,8 @@ class SafeguardConfigResponse(BaseModel):
     id: int
     trader_id: int = Field(alias="traderId")
     config_json: dict[str, Any] = Field(alias="configJson")
-    created_at: datetime = Field(alias="createdAt")
-    updated_at: datetime = Field(alias="updatedAt")
+    created_at: datetime | None = Field(None, alias="createdAt")
+    updated_at: datetime | None = Field(None, alias="updatedAt")
 
 
 class SafeguardConfigUpdateRequest(BaseModel):

@@ -58,7 +58,14 @@ async def get_safeguard_config(
     config = result.scalar_one_or_none()
 
     if config is None:
-        raise HTTPException(status_code=404, detail="Safeguard config not found")
+        # Return default empty config instead of 404
+        return ok(SafeguardConfigResponse(
+            id=0,
+            trader_id=trader_id,
+            config_json={},
+            created_at=None,
+            updated_at=None,
+        ))
 
     return ok(SafeguardConfigResponse(
         id=config.id,
