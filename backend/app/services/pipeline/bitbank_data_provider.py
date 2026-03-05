@@ -90,31 +90,56 @@ class BitbankDataProvider(BaseDataProvider):
 
     # --- BaseDataProvider interface ---
 
+    # bitbank API: H4/D1 etc. use YYYY format, shorter timeframes use YYYYMMDD
+    _YEARLY_CANDLE_TYPES = {"4hour", "8hour", "12hour", "1day", "1week", "1month"}
+
     async def get_ohlcv(self, pair: str, timeframe: str, limit: int) -> list[OHLCV]:
-        """Get the latest N OHLCV bars. Reference: 16書§3-2"""
+        """Get the latest N OHLCV bars. Reference: 16書§3-2
+
+        bitbank candlestick API date format:
+        - M1/M5/M15/M30/H1: YYYYMMDD (日単位)
+        - H4/D1 etc.: YYYY (年単位)
+        """
         candle_type = self.to_candle_type(timeframe)
         bb_pair = self.to_bitbank_pair(pair)
-        date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+        now = datetime.now(timezone.utc)
 
-        data = await self._public_get(
-            f"/{bb_pair}/candlestick/{candle_type}/{date_str}",
-        )
-        candlesticks = data.get("data", {}).get("candlestick", [])
+        if candle_type in self._YEARLY_CANDLE_TYPES:
+            # Yearly format: fetch current year (+ previous year if needed)
+            date_keys = [now.strftime("%Y")]
+            if limit > 100:
+                date_keys.insert(0, str(now.year - 1))
+        else:
+            # Daily format: fetch today (+ previous days for larger limits)
+            dates_needed = max(1, (limit + 23) // 24)  # ~24 bars/day for H1
+            date_keys = [
+                (now - timedelta(days=i)).strftime("%Y%m%d")
+                for i in range(min(dates_needed, 10) - 1, -1, -1)
+            ]
 
         bars: list[OHLCV] = []
-        for cs in candlesticks:
-            for ohlcv_item in cs.get("ohlcv", []):
-                # bitbank: [open, high, low, close, volume, timestamp]
-                bars.append(OHLCV(
-                    timestamp=datetime.fromtimestamp(
-                        int(ohlcv_item[5]) / 1000, tz=timezone.utc,
-                    ),
-                    open=float(ohlcv_item[0]),
-                    high=float(ohlcv_item[1]),
-                    low=float(ohlcv_item[2]),
-                    close=float(ohlcv_item[3]),
-                    volume=float(ohlcv_item[4]),
-                ))
+        for date_str in date_keys:
+            try:
+                data = await self._public_get(
+                    f"/{bb_pair}/candlestick/{candle_type}/{date_str}",
+                )
+                candlesticks = data.get("data", {}).get("candlestick", [])
+                for cs in candlesticks:
+                    for ohlcv_item in cs.get("ohlcv", []):
+                        bars.append(OHLCV(
+                            timestamp=datetime.fromtimestamp(
+                                int(ohlcv_item[5]) / 1000, tz=timezone.utc,
+                            ),
+                            open=float(ohlcv_item[0]),
+                            high=float(ohlcv_item[1]),
+                            low=float(ohlcv_item[2]),
+                            close=float(ohlcv_item[3]),
+                            volume=float(ohlcv_item[4]),
+                        ))
+            except RuntimeError:
+                logger.warning(
+                    "Failed to fetch candlestick for %s %s on %s", pair, candle_type, date_str,
+                )
 
         bars.sort(key=lambda x: x.timestamp)
         return bars[-limit:] if len(bars) > limit else bars

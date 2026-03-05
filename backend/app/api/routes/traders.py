@@ -109,10 +109,15 @@ async def get_trader(
 async def update_trader(
     trader_id: int,
     req: TraderUpdateRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """トレーダー更新."""
+    """トレーダー更新.
+
+    エンジンが running の場合、設定変更を反映するため自動で再起動する。
+    trade_type/symbols の変更にも対応。
+    """
     q = select(Trader).where(Trader.id == trader_id, Trader.user_id == user.id)
     result = await db.execute(q)
     trader = result.scalar_one_or_none()
@@ -120,11 +125,54 @@ async def update_trader(
     if trader is None:
         raise HTTPException(status_code=404, detail="Trader not found")
 
+    was_running = trader.status == "running"
+
     update_data = req.model_dump(exclude_unset=True, by_alias=False)
     for field, value in update_data.items():
         setattr(trader, field, value)
     await db.flush()
     await db.refresh(trader)
+
+    # エンジンが稼働中なら再起動して設定を反映
+    if was_running and update_data:
+        engine_manager = request.app.state.engine_manager
+        try:
+            await engine_manager.stop_trader(trader_id, force_close=False)
+        except Exception:
+            logger.exception("Failed to stop engine for trader %d during update", trader_id)
+
+        # 新しい設定でエンジン再起動
+        exchange_type = "gmo_fx" if trader.trade_type == "FX" else "bitbank"
+        ec_q = select(ExchangeConfig).where(
+            ExchangeConfig.user_id == user.id,
+            ExchangeConfig.exchange_type == exchange_type,
+            ExchangeConfig.is_active == True,
+        )
+        ec = (await db.execute(ec_q)).scalar_one_or_none()
+        if ec is not None:
+            vault = KeyVault(settings.MASTER_ENCRYPTION_KEY)
+            api_key = vault.decrypt(ec.api_key_encrypted)
+            api_secret = vault.decrypt(ec.api_secret_encrypted)
+            pair = trader.symbols[0] if trader.symbols else "USD_JPY"
+
+            try:
+                await engine_manager.start_trader(
+                    trader_id=trader.id,
+                    pair=pair,
+                    trade_type=trader.trade_type,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    trader_config={},
+                    user_id=user.id,
+                )
+                logger.info(
+                    "Engine for trader %d restarted with updated config (pair=%s, type=%s)",
+                    trader_id, pair, trader.trade_type,
+                )
+            except Exception:
+                logger.exception("Failed to restart engine for trader %d after update", trader_id)
+                trader.status = "stopped"
+                await db.flush()
 
     return ok(_trader_response(trader))
 
