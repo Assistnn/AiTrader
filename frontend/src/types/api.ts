@@ -80,6 +80,16 @@ export interface PriceQuote {
   timestamp: string;
 }
 
+/** Model stage config. Matches backend ModelStageResponse. */
+export interface ModelStageConfig {
+  id: number;
+  traderId: number;
+  stage: string;
+  configJson: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** Trade history record. Matches backend TradeHistoryItem. */
 export interface TradeRecord {
   id: number;

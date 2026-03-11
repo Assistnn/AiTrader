@@ -109,7 +109,7 @@ async def add_notification_email(
         is_active=req.is_active,
     )
     db.add(email)
-    await db.flush()
+    await db.commit()
     await db.refresh(email)
 
     return ok(NotificationEmailItem(
@@ -202,7 +202,7 @@ async def update_daily_notification_config(
     for field, value in update_data.items():
         setattr(config, field, value)
 
-    await db.flush()
+    await db.commit()
     await db.refresh(config)
 
     return ok(DailyNotificationConfigResponse(

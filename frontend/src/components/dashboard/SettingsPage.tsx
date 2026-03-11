@@ -10,8 +10,8 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { apiClient, fetcher } from "@/lib/api";
 import { Select } from "@/components/ui/select";
-import { SafeguardSettingsPanel } from "@/components/dashboard/SafeguardSettingsPanel";
-import { useTraders } from "@/hooks/useDashboard";
+import { SafeguardSettingsPanel, defaultSafeguardConfig } from "@/components/dashboard/SafeguardSettingsPanel";
+import { useTraders, useSafeguardConfig } from "@/hooks/useDashboard";
 import type {
   ExchangeConfig,
   AiConfig,
@@ -255,6 +255,9 @@ function AISettings() {
 function SafeguardSettings() {
   const { data: traders } = useTraders();
   const [traderId, setTraderId] = useState<number | null>(null);
+  const { data: sgData, mutate: mutateSg } = useSafeguardConfig(traderId);
+  const [form, setForm] = useState<Record<string, unknown>>(defaultSafeguardConfig());
+  const [saving, setSaving] = useState(false);
 
   // Auto-select first trader
   useEffect(() => {
@@ -262,6 +265,44 @@ function SafeguardSettings() {
       setTraderId(traders[0].id);
     }
   }, [traders, traderId]);
+
+  // Sync form from API
+  useEffect(() => {
+    if (sgData?.configJson && Object.keys(sgData.configJson).length > 0) {
+      setForm({ ...defaultSafeguardConfig(), ...sgData.configJson });
+    } else {
+      setForm(defaultSafeguardConfig());
+    }
+  }, [sgData]);
+
+  const handleChange = (path: string, value: unknown) => {
+    setForm((prev) => {
+      const parts = path.split(".");
+      if (parts.length === 1) return { ...prev, [parts[0]]: value };
+      const root = { ...prev };
+      const parent = parts.slice(0, -1).reduce<Record<string, unknown>>((obj, key) => {
+        const child = obj[key];
+        const copy = typeof child === "object" && child !== null ? { ...(child as Record<string, unknown>) } : {};
+        obj[key] = copy;
+        return copy;
+      }, root);
+      parent[parts[parts.length - 1]] = value;
+      return root;
+    });
+  };
+
+  const handleSave = async () => {
+    if (!traderId) return;
+    setSaving(true);
+    try {
+      await apiClient.put(`/api/v1/traders/${traderId}/safeguards`, form);
+      await mutateSg();
+    } catch {
+      // Error handled by apiClient
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -278,10 +319,22 @@ function SafeguardSettings() {
               label: t.traderName,
             })) || []
           }
-          onChange={(e) => setTraderId(Number(e.target.value))}
+          onChange={(e) => {
+            setTraderId(Number(e.target.value));
+            setForm(defaultSafeguardConfig());
+          }}
         />
       </div>
-      {traderId && <SafeguardSettingsPanel traderId={traderId} />}
+      {traderId && (
+        <>
+          <SafeguardSettingsPanel form={form} onChange={handleChange} />
+          <div className="pt-2">
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? "保存中..." : "セーフガード設定を保存"}
+            </Button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

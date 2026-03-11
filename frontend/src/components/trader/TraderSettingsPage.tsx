@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Header } from "@/components/common/Header";
 import { TraderList } from "@/components/trader/TraderList";
 import { BasicInfoTab } from "@/components/trader/tabs/BasicInfoTab";
@@ -12,9 +12,10 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Play, Plus, Square, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { useTraders } from "@/hooks/useDashboard";
+import { useTraders, useModelStages, useSafeguardConfig } from "@/hooks/useDashboard";
 import type { Trader } from "@/types/api";
 import { apiClient } from "@/lib/api";
+import { defaultSafeguardConfig } from "@/components/dashboard/SafeguardSettingsPanel";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { getPairOptions, getPairsForTradeType } from "@/constants/pairs";
@@ -36,6 +37,9 @@ export function TraderSettingsPage() {
   const { data: traders, mutate } = useTraders();
   const [selected, setSelected] = useState<Trader | null>(null);
   const [draft, setDraft] = useState<Partial<Trader>>({});
+  const { data: stageConfigs, mutate: mutateStages } = useModelStages(selected?.id ?? null);
+  const { data: safeguardData, mutate: mutateSafeguard } = useSafeguardConfig(selected?.id ?? null);
+  const [safeguardForm, setSafeguardForm] = useState<Record<string, unknown>>(defaultSafeguardConfig());
   const [stages, setStages] = useState({
     m1: { ...defaultStageConfig },
     m2: { ...defaultStageConfig },
@@ -56,10 +60,57 @@ export function TraderSettingsPage() {
     orderUnitLots: 1,
   });
 
-  const handleSelect = (trader: Trader) => {
-    setSelected(trader);
+  // Sync safeguard form from API
+  useEffect(() => {
+    if (safeguardData?.configJson && Object.keys(safeguardData.configJson).length > 0) {
+      setSafeguardForm({ ...defaultSafeguardConfig(), ...safeguardData.configJson });
+    } else {
+      setSafeguardForm(defaultSafeguardConfig());
+    }
+  }, [safeguardData]);
+
+  // Sync stages/mx from API when stageConfigs load
+  useEffect(() => {
+    if (!stageConfigs) return;
+    const newStages = {
+      m1: { ...defaultStageConfig },
+      m2: { ...defaultStageConfig },
+      m3: { ...defaultStageConfig },
+      m4: { ...defaultStageConfig },
+    };
+    let newMX = { ...defaultMX };
+    for (const cfg of stageConfigs) {
+      const json = cfg.configJson;
+      if (cfg.stage === "mx") {
+        newMX = {
+          evaluationMode: (json.evaluationMode as string) || defaultMX.evaluationMode,
+          scoreWeights: (json.scoreWeights as typeof defaultMX.scoreWeights) || defaultMX.scoreWeights,
+          scoreThreshold: (json.scoreThreshold as number) ?? defaultMX.scoreThreshold,
+        };
+      } else if (cfg.stage in newStages) {
+        const key = cfg.stage as keyof typeof newStages;
+        newStages[key] = {
+          enabled: (json.enabled as boolean) ?? true,
+          mode: (json.mode as string) || "rule",
+          timeframe: (json.timeframe as string) || "M15",
+          params: (json.params as Record<string, unknown>) || {},
+        };
+      }
+    }
+    setStages(newStages);
+    setMX(newMX);
+  }, [stageConfigs]);
+
+  const handleSelect = useCallback(async (trader: Trader) => {
     setDraft({});
-  };
+    setSafeguardForm(defaultSafeguardConfig());
+    try {
+      const detail = await apiClient.get<Trader>(`/api/v1/traders/${trader.id}`);
+      setSelected(detail);
+    } catch {
+      setSelected(trader);
+    }
+  }, []);
 
   const handleFieldChange = (field: string, value: unknown) => {
     setDraft((prev) => ({ ...prev, [field]: value }));
@@ -86,6 +137,22 @@ export function TraderSettingsPage() {
     });
   };
 
+  const handleSafeguardChange = (path: string, value: unknown) => {
+    setSafeguardForm((prev) => {
+      const parts = path.split(".");
+      if (parts.length === 1) return { ...prev, [parts[0]]: value };
+      const root = { ...prev };
+      const parent = parts.slice(0, -1).reduce<Record<string, unknown>>((obj, key) => {
+        const child = obj[key];
+        const copy = typeof child === "object" && child !== null ? { ...(child as Record<string, unknown>) } : {};
+        obj[key] = copy;
+        return copy;
+      }, root);
+      parent[parts[parts.length - 1]] = value;
+      return root;
+    });
+  };
+
   const handleMXChange = (field: string, value: unknown) => {
     setMX((prev) => {
       if (field.startsWith("scoreWeights.")) {
@@ -103,12 +170,45 @@ export function TraderSettingsPage() {
     if (!selected) return;
     setSaving(true);
     try {
-      await apiClient.put(`/api/v1/traders/${selected.id}`, {
-        ...draft,
-        stages,
-        mx,
+      // 1. Save basic trader fields (only changed ones)
+      if (Object.keys(draft).length > 0) {
+        await apiClient.put(`/api/v1/traders/${selected.id}`, draft);
+      }
+
+      // 2. Save each stage config via model-stages API
+      const stageEntries = Object.entries(stages) as [string, typeof stages.m1][];
+      await Promise.all(
+        stageEntries.map(([stage, cfg]) =>
+          apiClient.put(`/api/v1/traders/${selected.id}/model-stages/${stage}`, {
+            enabled: cfg.enabled,
+            mode: cfg.mode,
+            timeframe: cfg.timeframe,
+            params: cfg.params,
+          })
+        )
+      );
+
+      // 3. Save MX config
+      await apiClient.put(`/api/v1/traders/${selected.id}/model-stages/mx`, {
+        evaluationMode: mx.evaluationMode,
+        scoreWeights: mx.scoreWeights,
+        scoreThreshold: mx.scoreThreshold,
       });
+
+      // 4. Save safeguard config
+      await apiClient.put(`/api/v1/traders/${selected.id}/safeguards`, safeguardForm);
+
+      // 5. Refresh data and update selected with full detail
       await mutate();
+      await mutateStages();
+      await mutateSafeguard();
+      try {
+        const detail = await apiClient.get<Trader>(`/api/v1/traders/${selected.id}`);
+        setSelected(detail);
+      } catch {
+        // keep current selected
+      }
+      setDraft({});
     } catch {
       // error handled by apiClient
     } finally {
@@ -165,6 +265,12 @@ export function TraderSettingsPage() {
     try {
       await apiClient.post(`/api/v1/traders/${selected.id}/${action}`);
       await mutate();
+      try {
+        const detail = await apiClient.get<Trader>(`/api/v1/traders/${selected.id}`);
+        setSelected(detail);
+      } catch {
+        // keep current selected
+      }
     } catch {
       alert(`${action === "start" ? "開始" : "停止"}に失敗しました`);
     } finally {
@@ -386,7 +492,7 @@ export function TraderSettingsPage() {
                   <MXTab mx={mx} onChange={handleMXChange} />
                 </TabsContent>
                 <TabsContent value="safeguard">
-                  <SafeguardTab traderId={merged.id} />
+                  <SafeguardTab form={safeguardForm} onChange={handleSafeguardChange} />
                 </TabsContent>
               </Tabs>
             </div>

@@ -107,7 +107,7 @@ async def update_exchange_config(
         if req.is_active is not None:
             config.is_active = req.is_active
 
-    await db.flush()
+    await db.commit()
     await db.refresh(config)
 
     return ok(ExchangeConfigResponse(
@@ -179,7 +179,7 @@ async def update_ai_config(
         if req.is_active is not None:
             config.is_active = req.is_active
 
-    await db.flush()
+    await db.commit()
     await db.refresh(config)
 
     return ok(AiConfigResponse(

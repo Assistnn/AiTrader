@@ -5,7 +5,7 @@
 
 import useSWR from "swr";
 import { fetcher, paginatedFetcher } from "@/lib/api";
-import type { DashboardSummary, Trader, TradeRecord, PaginatedResponse } from "@/types/api";
+import type { DashboardSummary, Trader, TradeRecord, PaginatedResponse, ModelStageConfig } from "@/types/api";
 
 /** Dashboard summary with 5-second refresh. */
 export function useDashboardSummary() {
@@ -23,6 +23,24 @@ export function useTraders() {
     keepPreviousData: true,
     revalidateOnFocus: false,
   });
+}
+
+/** Model stage configs for a trader. */
+export function useModelStages(traderId: number | null) {
+  return useSWR<ModelStageConfig[]>(
+    traderId ? `/api/v1/traders/${traderId}/model-stages` : null,
+    fetcher,
+    { revalidateOnFocus: false },
+  );
+}
+
+/** Safeguard config for a trader. */
+export function useSafeguardConfig(traderId: number | null) {
+  return useSWR<{ id: number; traderId: number; configJson: Record<string, unknown> }>(
+    traderId ? `/api/v1/traders/${traderId}/safeguards` : null,
+    fetcher,
+    { revalidateOnFocus: false },
+  );
 }
 
 /** Trade history with pagination metadata. */

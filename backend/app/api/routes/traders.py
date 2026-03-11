@@ -83,7 +83,7 @@ async def create_trader(
         status="stopped",
     )
     db.add(trader)
-    await db.flush()
+    await db.commit()
     await db.refresh(trader)
 
     return ok(_trader_response(trader))
@@ -131,7 +131,7 @@ async def update_trader(
     update_data = req.model_dump(exclude_unset=True, by_alias=False)
     for field, value in update_data.items():
         setattr(trader, field, value)
-    await db.flush()
+    await db.commit()
     await db.refresh(trader)
 
     # エンジンが稼働中なら再起動して設定を反映
@@ -173,7 +173,7 @@ async def update_trader(
             except Exception:
                 logger.exception("Failed to restart engine for trader %d after update", trader_id)
                 trader.status = "stopped"
-                await db.flush()
+                await db.commit()
 
     return ok(_trader_response(trader))
 
@@ -193,7 +193,7 @@ async def delete_trader(
         raise HTTPException(status_code=404, detail="Trader not found")
 
     await db.delete(trader)
-    await db.flush()
+    await db.commit()
 
 
 @router.post("/{trader_id}/start")
@@ -259,7 +259,7 @@ async def start_trader(
         raise HTTPException(status_code=500, detail=f"Engine start failed: {e}")
 
     trader.status = "running"
-    await db.flush()
+    await db.commit()
 
     # WebSocket notification (16書§8-2)
     from app.api.routes.websocket import get_ws_manager
@@ -298,7 +298,7 @@ async def stop_trader(
         logger.exception("Failed to stop engine for trader %d", trader_id)
 
     trader.status = "stopped"
-    await db.flush()
+    await db.commit()
 
     # WebSocket notification
     from app.api.routes.websocket import get_ws_manager
@@ -351,7 +351,7 @@ async def close_all_positions(
     db_count = len(positions)
     for p in positions:
         await db.delete(p)
-    await db.flush()
+    await db.commit()
 
     total_closed = max(closed_count, db_count)
 

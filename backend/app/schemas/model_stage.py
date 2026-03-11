@@ -25,16 +25,13 @@ class ModelStageResponse(BaseModel):
 
 
 class ModelStageUpdateRequest(BaseModel):
-    """PUT /api/v1/traders/{traderId}/model-stages/{stage} リクエスト."""
+    """PUT /api/v1/traders/{traderId}/model-stages/{stage} リクエスト.
 
-    model_config = ConfigDict(populate_by_name=True)
+    config_json はステージごとに異なる構造を持つため、
+    任意のフィールドを受け付けてそのまま JSONB に保存する。
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     enabled: bool | None = None
-    timeframes: list[str] | None = None
-    use_trend_direction: bool | None = Field(None, alias="useTrendDirection")
-    use_range_avoid: bool | None = Field(None, alias="useRangeAvoid")
-    use_volatility: bool | None = Field(None, alias="useVolatility")
     mode: str | None = None
-    ai: dict[str, Any] | None = None
-    # Additional stage-specific fields stored as-is in config_json
-    extra: dict[str, Any] | None = None

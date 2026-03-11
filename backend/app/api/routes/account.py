@@ -41,7 +41,7 @@ async def update_account(
     update_data = req.model_dump(exclude_unset=True, by_alias=False)
     for field, value in update_data.items():
         setattr(user, field, value)
-    await db.flush()
+    await db.commit()
     await db.refresh(user)
 
     return ok(AccountResponse(

@@ -10,6 +10,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.db.session import get_db
 from app.models.user import User
@@ -58,7 +59,7 @@ async def get_safeguard_config(
     config = result.scalar_one_or_none()
 
     if config is None:
-        # Return default empty config instead of 404
+        logger.info("[SG-GET] trader_id=%d => no config, returning empty", trader_id)
         return ok(SafeguardConfigResponse(
             id=0,
             trader_id=trader_id,
@@ -67,6 +68,12 @@ async def get_safeguard_config(
             updated_at=None,
         ))
 
+    logger.info(
+        "[SG-GET] trader_id=%d, config_id=%d, maxDailyLossPct=%s, updated_at=%s",
+        trader_id, config.id,
+        config.config_json.get("maxDailyLossPct") if config.config_json else "N/A",
+        config.updated_at,
+    )
     return ok(SafeguardConfigResponse(
         id=config.id,
         trader_id=config.trader_id,
@@ -85,16 +92,20 @@ async def update_safeguard_config(
     user: User = Depends(get_current_user),
 ):
     """セーフガード設定更新."""
-    logger.info("Updating safeguard config for trader %d", trader_id)
     await _verify_trader_ownership(trader_id, user, db)
+
+    new_data = req.model_dump(exclude_unset=True, by_alias=True)
+    logger.info(
+        "[SG-PUT] trader_id=%d, new_data keys=%s, maxDailyLossPct=%s",
+        trader_id, list(new_data.keys()), new_data.get("maxDailyLossPct"),
+    )
 
     q = select(SafeguardConfig).where(SafeguardConfig.trader_id == trader_id)
     result = await db.execute(q)
     config = result.scalar_one_or_none()
 
-    new_data = req.model_dump(exclude_unset=True, by_alias=False)
-
     if config is None:
+        logger.info("[SG-PUT] No existing config, creating new for trader_id=%d", trader_id)
         config = SafeguardConfig(
             user_id=user.id,
             trader_id=trader_id,
@@ -103,7 +114,16 @@ async def update_safeguard_config(
         db.add(config)
     else:
         old_config = dict(config.config_json) if config.config_json else {}
+        logger.info(
+            "[SG-PUT] Existing config_id=%d, old maxDailyLossPct=%s",
+            config.id, old_config.get("maxDailyLossPct"),
+        )
         config.config_json = {**old_config, **new_data}
+        flag_modified(config, "config_json")
+        logger.info(
+            "[SG-PUT] After merge: maxDailyLossPct=%s",
+            config.config_json.get("maxDailyLossPct"),
+        )
 
         change = ConfigChange(
             user_id=user.id,
@@ -117,8 +137,20 @@ async def update_safeguard_config(
         )
         db.add(change)
 
-    await db.flush()
+    try:
+        await db.commit()
+        logger.info("[SG-PUT] commit() succeeded for trader_id=%d", trader_id)
+    except Exception:
+        logger.exception("[SG-PUT] commit() FAILED for trader_id=%d", trader_id)
+        raise
+
     await db.refresh(config)
+    logger.info(
+        "[SG-PUT] After refresh: config_id=%d, maxDailyLossPct=%s, updated_at=%s",
+        config.id,
+        config.config_json.get("maxDailyLossPct") if config.config_json else "N/A",
+        config.updated_at,
+    )
 
     # Notify running engine via ConfigEventBus (16書§7-2)
     try:
@@ -131,13 +163,18 @@ async def update_safeguard_config(
     except Exception:
         logger.warning("ConfigEventBus publish failed for trader %d", trader_id)
 
-    return ok(SafeguardConfigResponse(
+    resp = SafeguardConfigResponse(
         id=config.id,
         trader_id=config.trader_id,
         config_json=config.config_json,
         created_at=config.created_at,
         updated_at=config.updated_at,
-    ))
+    )
+    logger.info(
+        "[SG-PUT] Response: id=%d, maxDailyLossPct=%s",
+        resp.id, resp.config_json.get("maxDailyLossPct") if resp.config_json else "N/A",
+    )
+    return ok(resp)
 
 
 @router.get("/logs")

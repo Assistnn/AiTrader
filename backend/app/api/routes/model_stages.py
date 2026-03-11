@@ -10,6 +10,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.db.session import get_db
 from app.models.user import User
@@ -134,6 +135,7 @@ async def update_model_stage(
         # Record config change
         old_config = dict(config.config_json) if config.config_json else {}
         config.config_json = {**old_config, **new_config}
+        flag_modified(config, "config_json")
 
         change = ConfigChange(
             user_id=user.id,
@@ -148,7 +150,7 @@ async def update_model_stage(
         db.add(change)
 
     change = locals().get("change")
-    await db.flush()
+    await db.commit()
     await db.refresh(config)
     if change is not None:
         await db.refresh(change)
