@@ -43,7 +43,7 @@ class GmoFxDataProvider(BaseDataProvider):
     Public REST API for OHLCV and ticker data.
     """
 
-    PUBLIC_URL = "https://api.coin.z.com/public"
+    PUBLIC_URL = "https://forex-api.coin.z.com/public"
 
     def __init__(self) -> None:
         self._client = httpx.AsyncClient(
@@ -76,7 +76,7 @@ class GmoFxDataProvider(BaseDataProvider):
         date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
         data = await self._public_get(
             "/v1/klines",
-            params={"symbol": pair, "interval": interval, "date": date_str},
+            params={"symbol": pair, "priceType": "BID", "interval": interval, "date": date_str},
         )
         bars_raw = data.get("data", [])
 
@@ -98,16 +98,18 @@ class GmoFxDataProvider(BaseDataProvider):
 
     async def get_ticker(self, pair: str) -> Ticker:
         """Get the latest ticker. Reference: 16書§3-1"""
-        data = await self._public_get("/v1/ticker", params={"symbol": pair})
+        data = await self._public_get("/v1/ticker")
         items = data.get("data", [])
         item = next((i for i in items if i.get("symbol") == pair), items[0] if items else None)
         if item is None:
             raise RuntimeError(f"Ticker not found for {pair}")
+        bid = float(item["bid"])
+        ask = float(item["ask"])
         return Ticker(
             timestamp=datetime.now(timezone.utc),
-            bid=float(item["bid"]),
-            ask=float(item["ask"]),
-            last=float(item["last"]),
+            bid=bid,
+            ask=ask,
+            last=float(item.get("last", (bid + ask) / 2)),
             volume=float(item.get("volume", 0)),
         )
 
@@ -156,7 +158,7 @@ class GmoFxDataProvider(BaseDataProvider):
             try:
                 data = await self._public_get(
                     "/v1/klines",
-                    params={"symbol": pair, "interval": interval, "date": date_str},
+                    params={"symbol": pair, "priceType": "BID", "interval": interval, "date": date_str},
                 )
                 bars_raw = data.get("data", [])
                 for b in bars_raw:

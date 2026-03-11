@@ -80,9 +80,9 @@ class Settings(BaseSettings):
     ORDER_FILL_POLL_INTERVAL: float = 1.0
 
     # --- GMO Coin ---
-    GMO_BASE_URL_PUBLIC: str = "https://api.coin.z.com/public"
-    GMO_BASE_URL_PRIVATE: str = "https://api.coin.z.com/private"
-    GMO_WS_URL: str = "wss://api.coin.z.com/ws/public/v1"
+    GMO_BASE_URL_PUBLIC: str = "https://forex-api.coin.z.com/public"
+    GMO_BASE_URL_PRIVATE: str = "https://forex-api.coin.z.com/private"
+    GMO_WS_URL: str = "wss://forex-api.coin.z.com/ws/public/v1"
 
     # --- bitbank ---
     BITBANK_BASE_URL_PUBLIC: str = "https://public.bitbank.cc"

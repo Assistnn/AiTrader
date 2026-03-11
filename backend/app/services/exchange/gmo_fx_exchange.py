@@ -2,8 +2,8 @@
 GMO Coin FX exchange implementation.
 
 Reference: 06_取引所抽象化 Section 5, 16_実行エンジンとUI接続 Section 3-1
-Public API: https://api.coin.z.com/public
-Private API: https://api.coin.z.com/private
+Public API: https://forex-api.coin.z.com/public
+Private API: https://forex-api.coin.z.com/private
 Authentication: API Key + HMAC-SHA256
 Rate limit: Private API 1 req/sec (managed by OrderRateLimiter)
 """
@@ -78,8 +78,8 @@ class GmoFxExchange(BaseExchange):
     Authentication: API Key + HMAC-SHA256
     """
 
-    PUBLIC_URL = "https://api.coin.z.com/public"
-    PRIVATE_URL = "https://api.coin.z.com/private"
+    PUBLIC_URL = "https://forex-api.coin.z.com/public"
+    PRIVATE_URL = "https://forex-api.coin.z.com/private"
 
     def __init__(self, api_key: str, api_secret: str):
         self.api_key = api_key
@@ -191,11 +191,13 @@ class GmoFxExchange(BaseExchange):
         item = next((i for i in items if i.get("symbol") == pair), items[0] if items else None)
         if item is None:
             raise GmoApiError(404, f"Ticker not found for {pair}")
+        bid = float(item["bid"])
+        ask = float(item["ask"])
         return Ticker(
             timestamp=datetime.now(timezone.utc),
-            bid=float(item["bid"]),
-            ask=float(item["ask"]),
-            last=float(item["last"]),
+            bid=bid,
+            ask=ask,
+            last=float(item.get("last", (bid + ask) / 2)),
             volume=float(item.get("volume", 0)),
         )
 
@@ -205,11 +207,11 @@ class GmoFxExchange(BaseExchange):
         if interval is None:
             raise ValueError(f"Unsupported timeframe for GMO: {timeframe}")
 
-        # GMO klines requires date parameter (YYYYMMDD)
+        # GMO FX klines requires date (YYYYMMDD) and priceType (BID/ASK)
         date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
         data = await self._public_get(
             "/v1/klines",
-            params={"symbol": pair, "interval": interval, "date": date_str},
+            params={"symbol": pair, "priceType": "BID", "interval": interval, "date": date_str},
         )
         bars_raw = data.get("data", [])
 
@@ -253,6 +255,7 @@ class GmoFxExchange(BaseExchange):
             "side": side.value,
             "size": str(amount),
             "executionType": order_type.value,
+            "settleType": "OPEN",
         }
         if price is not None and order_type != OrderType.MARKET:
             body["price"] = str(price)
@@ -283,9 +286,9 @@ class GmoFxExchange(BaseExchange):
         )
 
     async def cancel_order(self, order_id: str) -> bool:
-        """Cancel an order. Reference: 16書§3-1 POST /v1/cancelOrder"""
+        """Cancel an order. Reference: 16書§3-1 POST /v1/cancelOrders"""
         await self._rate_limiter.wait_if_needed()
-        await self._private_post("/v1/cancelOrder", {"orderId": int(order_id)})
+        await self._private_post("/v1/cancelOrders", {"orderIds": [int(order_id)]})
         self._rate_limiter.record_order()
         log_with_data(logger, logging.INFO, "Order cancelled", {"order_id": order_id})
         return True
@@ -356,9 +359,7 @@ class GmoFxExchange(BaseExchange):
             "side": close_side.value,
             "size": str(close_amount),
             "executionType": "MARKET",
-            "settlePosition": [
-                {"positionId": int(position_id), "size": str(close_amount)},
-            ],
+            "closePositionId": int(position_id),
         }
 
         data = await self._private_post("/v1/closeOrder", body)
@@ -382,14 +383,17 @@ class GmoFxExchange(BaseExchange):
         )
 
     async def get_balance(self) -> Balance:
-        """Get account balance. Reference: 16書§3-1 GET /v1/account/margin"""
-        data = await self._private_get("/v1/account/margin")
-        margin = data.get("data", {})
+        """Get account balance. Reference: 16書§3-1 GET /v1/account/assets"""
+        data = await self._private_get("/v1/account/assets")
+        assets = data.get("data", {})
+        # FX API returns data as a dict (not a list)
+        if isinstance(assets, list):
+            assets = assets[0] if assets else {}
         return Balance(
-            total=float(margin.get("actualProfitLoss", 0)),
-            available=float(margin.get("availableAmount", 0)),
-            margin_used=float(margin.get("margin", 0)),
-            unrealized_pnl=float(margin.get("profitLoss", 0)),
+            total=float(assets.get("equity", 0)),
+            available=float(assets.get("availableAmount", 0)),
+            margin_used=float(assets.get("margin", 0)),
+            unrealized_pnl=float(assets.get("positionLossGain", 0)),
             currency="JPY",
         )
 
