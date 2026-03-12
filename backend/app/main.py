@@ -9,9 +9,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
+import logging
 
 from app.config import settings
-from app.api.routes.auth import router as auth_router
+from app.api.routes.auth import limiter, router as auth_router
+
+logger = logging.getLogger(__name__)
 from app.api.routes.account import router as account_router
 from app.api.routes.backtests import router as backtests_router
 from app.api.routes.charts import router as charts_router
@@ -118,12 +124,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# --- Rate limiting (11_セキュリティ §8) ---
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# --- CORS (11_セキュリティ §9) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 

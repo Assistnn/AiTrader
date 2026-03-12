@@ -7,7 +7,6 @@ import { apiClient } from "@/lib/api";
 
 interface LoginResponse {
   accessToken: string;
-  refreshToken: string;
   expiresIn: number;
 }
 
@@ -29,7 +28,7 @@ export default function LoginPage() {
         email,
         password,
       });
-      setTokens(res.accessToken, res.refreshToken);
+      setTokens(res.accessToken);
       apiClient.setToken(res.accessToken);
       router.replace("/");
     } catch (err) {

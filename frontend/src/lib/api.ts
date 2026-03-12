@@ -1,6 +1,9 @@
 /**
  * API client for backend communication.
- * Reference: 08_API仕様, 10_フロントエンドアーキテクチャ
+ * Reference: 08_API仕様, 10_フロントエンドアーキテクチャ, 11_セキュリティ §2-1
+ *
+ * - credentials: "include" on all requests (for HttpOnly refresh cookie)
+ * - refreshToken is sent via cookie, not request body
  */
 
 import type { ApiResponse } from "@/types/api";
@@ -39,6 +42,7 @@ class ApiClient {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: "GET",
       headers: this.headers(),
+      credentials: "include",
     });
     return this.handleResponse<T>(res, "GET", path);
   }
@@ -48,6 +52,7 @@ class ApiClient {
       method: "POST",
       headers: this.headers(),
       body: body ? JSON.stringify(body) : undefined,
+      credentials: "include",
     });
     return this.handleResponse<T>(res, "POST", path, body);
   }
@@ -57,6 +62,7 @@ class ApiClient {
       method: "PUT",
       headers: this.headers(),
       body: JSON.stringify(body),
+      credentials: "include",
     });
     return this.handleResponse<T>(res, "PUT", path, body);
   }
@@ -65,24 +71,23 @@ class ApiClient {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: "DELETE",
       headers: this.headers(),
+      credentials: "include",
     });
     return this.handleResponse<T>(res, "DELETE", path);
   }
 
   /**
-   * Attempt to refresh the access token using the stored refresh token.
+   * Attempt to refresh the access token using the HttpOnly refresh cookie.
    * Returns true if refresh succeeded, false otherwise.
+   * Reference: 11_セキュリティ §2-1 — refreshToken is in HttpOnly cookie
    */
   private async tryRefresh(): Promise<boolean> {
-    const store = useAuthStore.getState();
-    const refreshToken = store.refreshToken;
-    if (!refreshToken) return false;
-
     try {
       const res = await fetch(`${this.baseUrl}/api/v1/auth/refresh`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refreshToken }),
+        credentials: "include",
+        body: JSON.stringify({}),
       });
 
       if (!res.ok) return false;
@@ -96,7 +101,7 @@ class ApiClient {
       if (!newAccessToken) return false;
 
       this.token = newAccessToken;
-      store.setTokens(newAccessToken, refreshToken);
+      useAuthStore.getState().setTokens(newAccessToken);
       return true;
     } catch {
       return false;
@@ -130,6 +135,7 @@ class ApiClient {
           method,
           headers: this.headers(),
           body: body ? JSON.stringify(body) : undefined,
+          credentials: "include",
         });
         return this.parseResponse<T>(retryRes);
       }
@@ -186,6 +192,7 @@ export const paginatedFetcher = async <T>(path: string): Promise<{data: T[]; pag
       "Content-Type": "application/json",
       ...(apiClient.getToken() ? { Authorization: `Bearer ${apiClient.getToken()}` } : {}),
     },
+    credentials: "include",
   });
 
   if (res.status === 401) {

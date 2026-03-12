@@ -15,6 +15,9 @@ python-jose[cryptography]==3.5.0
 passlib[bcrypt]==1.7.4
 cryptography==46.0.5
 
+# === Rate Limiting (11_セキュリティ §8) ===
+slowapi==0.1.9
+
 # === HTTP Client ===
 httpx==0.28.1
 websockets==14.2

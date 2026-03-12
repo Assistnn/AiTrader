@@ -10,10 +10,13 @@ Reference: 16_実行エンジンとUI接続 Section 10
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -141,6 +144,30 @@ class EconomicCalendarFetcher:
         """
         return not self.is_cache_valid
 
+    @staticmethod
+    def _validate_url(url: str) -> None:
+        """Validate URL to prevent SSRF attacks. Reference: 11_セキュリティ §10"""
+        parsed = urlparse(url)
+
+        # Only allow https
+        if parsed.scheme != "https":
+            raise ValueError(f"URL scheme must be https, got: {parsed.scheme}")
+
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("URL has no hostname")
+
+        # Resolve hostname and check for private IPs
+        try:
+            addrs = socket.getaddrinfo(hostname, None)
+        except socket.gaierror:
+            raise ValueError(f"Cannot resolve hostname: {hostname}")
+
+        for _family, _type, _proto, _canonname, sockaddr in addrs:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                raise ValueError(f"URL resolves to private/reserved IP: {ip}")
+
     async def _fetch_from_api(
         self,
         start: datetime,
@@ -156,12 +183,15 @@ class EconomicCalendarFetcher:
             logger.info("No economic calendar API URL configured, returning empty")
             return []
 
+        # SSRF prevention (11_セキュリティ §10)
+        self._validate_url(api_url)
+
         async with httpx.AsyncClient(timeout=self._http_timeout) as client:
             params = {
                 "from": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "to": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
-            resp = await client.get(api_url, params=params)
+            resp = await client.get(api_url, params=params, follow_redirects=False)
             resp.raise_for_status()
             data = resp.json()
 

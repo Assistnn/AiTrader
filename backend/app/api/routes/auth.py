@@ -1,14 +1,16 @@
 """
 Authentication API routes.
 
-Reference: 08_API仕様 Section 3-1, 11_セキュリティ Section 2
+Reference: 08_API仕様 Section 3-1, 11_セキュリティ Section 2, 8, 9
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,10 +22,39 @@ from app.services.auth.jwt_handler import (
     create_refresh_token,
     decode_token,
     ACCESS_TOKEN_EXPIRE_MINUTES,
+    REFRESH_TOKEN_EXPIRE_DAYS,
 )
 from app.api.response import ok
 
+limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+
+REFRESH_COOKIE_NAME = "refresh_token"
+REFRESH_COOKIE_MAX_AGE = REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60  # seconds
+
+
+def _set_refresh_cookie(response: Response, token: str) -> None:
+    """Set refresh token as HttpOnly cookie. Reference: 11_セキュリティ §2-1"""
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        max_age=REFRESH_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/api/v1/auth",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    """Clear refresh token cookie on logout."""
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/api/v1/auth",
+    )
 
 
 # --- Request/Response schemas ---
@@ -36,12 +67,11 @@ class LoginRequest(BaseModel):
 
 class LoginResponse(BaseModel):
     accessToken: str
-    refreshToken: str
     expiresIn: int
 
 
 class RefreshRequest(BaseModel):
-    refreshToken: str
+    refreshToken: str | None = None
 
 
 class RefreshResponse(BaseModel):
@@ -64,9 +94,11 @@ class RegisterResponse(BaseModel):
 
 
 @router.post("/login")
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("5/minute")
+async def login(request: Request, body: LoginRequest, db: AsyncSession = Depends(get_db)):
     """
     Authenticate user and issue JWT tokens.
+    refreshToken is set as HttpOnly cookie (11_セキュリティ §2-1).
 
     Reference: 08_API仕様 POST /api/v1/auth/login
     """
@@ -84,21 +116,41 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     access_token = create_access_token(user.id)
     refresh_token = create_refresh_token(user.id)
 
-    return ok(LoginResponse(
+    response_data = ok(LoginResponse(
         accessToken=access_token,
-        refreshToken=refresh_token,
         expiresIn=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     ))
 
+    response = Response(
+        content=__import__("json").dumps(response_data),
+        media_type="application/json",
+    )
+    _set_refresh_cookie(response, refresh_token)
+    return response
+
 
 @router.post("/refresh")
-async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute")
+async def refresh(
+    request: Request,
+    body: RefreshRequest | None = None,
+    refresh_token: str | None = Cookie(None, alias=REFRESH_COOKIE_NAME),
+    db: AsyncSession = Depends(get_db),
+):
     """
-    Refresh access token using a valid refresh token.
+    Refresh access token using refresh token from HttpOnly cookie or request body (legacy).
 
-    Reference: 08_API仕様 POST /api/v1/auth/refresh
+    Reference: 08_API仕様 POST /api/v1/auth/refresh, 11_セキュリティ §2-1
     """
-    payload = decode_token(body.refreshToken)
+    # Prefer cookie, fall back to body for backward compatibility
+    token = refresh_token or (body.refreshToken if body else None)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No refresh token provided",
+        )
+
+    payload = decode_token(token)
     if payload is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -133,15 +185,21 @@ async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
 @router.post("/logout")
 async def logout():
     """
-    Logout (client-side token discard).
+    Logout: clear refresh token cookie.
 
-    Reference: 08_API仕様 POST /api/v1/auth/logout
+    Reference: 08_API仕様 POST /api/v1/auth/logout, 11_セキュリティ §2-1
     """
-    return {"status": "ok"}
+    response = Response(
+        content=__import__("json").dumps({"status": "ok"}),
+        media_type="application/json",
+    )
+    _clear_refresh_cookie(response)
+    return response
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("3/hour")
+async def register(request: Request, body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     """
     Register a new user account.
     """
