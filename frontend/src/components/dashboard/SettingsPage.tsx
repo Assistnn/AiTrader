@@ -59,7 +59,7 @@ function ExchangeSettings() {
   });
 
   const exchanges = [
-    { type: "gmo", label: "GMOコイン" },
+    { type: "gmo_fx", label: "GMOコイン" },
     { type: "bitbank", label: "bitbank" },
   ];
 

@@ -12,7 +12,7 @@ interface BasicInfoTabProps {
 
 const tradeTypeOptions = [
   { value: "FX", label: "FX" },
-  { value: "crypto", label: "仮想通貨" },
+  { value: "Crypto", label: "仮想通貨" },
 ];
 
 export function BasicInfoTab({ trader, onChange }: BasicInfoTabProps) {
