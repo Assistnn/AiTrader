@@ -153,6 +153,9 @@ class EngineManager:
 
             self._engines[trader_id] = engine
 
+            # Register live price broadcast to WebSocket (16書§8-1)
+            self._register_price_broadcast(market_data_feed)
+
             # Warmup, start scheduler and feed, then create task
             await engine.warmup()
             await bar_scheduler.start([pair], data_provider)
@@ -309,6 +312,31 @@ class EngineManager:
             "Manual intervention required.",
             trader_id, max_retries,
         )
+
+    def _register_price_broadcast(
+        self,
+        market_data_feed: Any,
+    ) -> None:
+        """Register on_tick callback to broadcast live prices via WebSocket.
+
+        Reference: 16書§8-1 — MarketDataFeedからWebSocket pricesチャネルへの配信
+        """
+        from app.api.routes.websocket import get_ws_manager
+        from app.services.pipeline.data_types import Ticker
+        from datetime import datetime, timezone
+
+        ws_manager = get_ws_manager()
+        ws_manager.set_live_feed(True)
+
+        async def _broadcast_tick(pair: str, ticker: Ticker) -> None:
+            await ws_manager.broadcast("prices", {
+                "pair": pair,
+                "bid": ticker.bid,
+                "ask": ticker.ask,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+        market_data_feed.add_on_tick(_broadcast_tick)
 
     def _create_orchestrator(self, config: dict) -> DecisionOrchestrator:
         """Create a DecisionOrchestrator with default judges.

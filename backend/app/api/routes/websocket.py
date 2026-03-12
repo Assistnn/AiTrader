@@ -162,15 +162,20 @@ class ConnectionManager:
         })
 
     async def _mock_price_loop(self) -> None:
-        """Broadcast mock prices every second for development/testing."""
+        """Broadcast mock prices every second for development/testing.
+
+        Note: These are fallback values when no live engine is running.
+        When engines are active, set_live_feed(True) stops this loop.
+        """
         prices = {
-            "USD_JPY": {"bid": 150.250, "ask": 150.253},
-            "EUR_JPY": {"bid": 162.500, "ask": 162.505},
-            "GBP_JPY": {"bid": 189.100, "ask": 189.108},
-            "EUR_USD": {"bid": 1.08150, "ask": 1.08155},
-            "BTC_JPY": {"bid": 6550000, "ask": 6551000},
-            "ETH_JPY": {"bid": 345000, "ask": 345200},
-            "XRP_JPY": {"bid": 85.50, "ask": 85.60},
+            "USD_JPY": {"bid": 148.500, "ask": 148.503},
+            "EUR_JPY": {"bid": 161.200, "ask": 161.205},
+            "GBP_JPY": {"bid": 191.300, "ask": 191.308},
+            "EUR_USD": {"bid": 1.08600, "ask": 1.08605},
+            "CHF_JPY": {"bid": 168.400, "ask": 168.406},
+            "BTC_JPY": {"bid": 12800000, "ask": 12802000},
+            "ETH_JPY": {"bid": 310000, "ask": 310200},
+            "XRP_JPY": {"bid": 340.0, "ask": 340.2},
         }
         try:
             while self.active_connections:
