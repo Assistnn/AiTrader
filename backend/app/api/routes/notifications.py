@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.models.user import User
-from app.models.notification import NotificationEmail, DailyNotificationConfig
+from app.models.notification import NotificationEmail, DailyNotificationConfig, SmtpConfig, NotificationTriggerConfig
 from app.schemas.notification import (
     SmtpConfigResponse,
     SmtpConfigUpdateRequest,
@@ -19,53 +19,77 @@ from app.schemas.notification import (
     NotificationEmailCreateRequest,
     DailyNotificationConfigResponse,
     DailyNotificationConfigUpdateRequest,
+    TriggerConfigItem,
+    TriggerConfigUpdateRequest,
 )
 from app.api.deps import get_current_user
 from app.api.response import ok
+from app.config import settings
 
 router = APIRouter(prefix="/api/v1/notifications", tags=["notifications"])
 
 
-# --- SMTP (stub: SMTP設定はDBテーブルなし、将来的に追加) ---
-
-# In-memory SMTP config per user (stub)
-_smtp_configs: dict[int, dict] = {}
+# --- SMTP (DB-backed: 07_データベーススキーマ §3-4) ---
 
 
 @router.get("/smtp")
 async def get_smtp_config(
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """SMTP設定取得."""
-    config = _smtp_configs.get(user.id, {})
+    q = select(SmtpConfig).where(SmtpConfig.user_id == user.id)
+    result = await db.execute(q)
+    config = result.scalar_one_or_none()
+
+    if config is None:
+        return ok(SmtpConfigResponse())
+
     return ok(SmtpConfigResponse(
-        host=config.get("host"),
-        port=config.get("port"),
-        username=config.get("username"),
-        use_tls=config.get("use_tls", True),
-        from_address=config.get("from_address"),
+        host=config.host,
+        port=config.port,
+        username=config.username,
+        use_tls=config.use_tls if config.use_tls is not None else True,
+        from_address=config.from_address,
     ))
 
 
 @router.put("/smtp")
 async def update_smtp_config(
     req: SmtpConfigUpdateRequest,
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """SMTP設定更新."""
-    existing = _smtp_configs.get(user.id, {})
+    q = select(SmtpConfig).where(SmtpConfig.user_id == user.id)
+    result = await db.execute(q)
+    config = result.scalar_one_or_none()
+
+    if config is None:
+        config = SmtpConfig(user_id=user.id)
+        db.add(config)
+
     update_data = req.model_dump(exclude_unset=True, by_alias=False)
-    # Do not store password in response
-    update_data.pop("password", None)
-    existing.update(update_data)
-    _smtp_configs[user.id] = existing
+
+    # Encrypt password if provided
+    password = update_data.pop("password", None)
+    if password:
+        from app.services.auth.key_vault import KeyVault
+        vault = KeyVault(settings.MASTER_ENCRYPTION_KEY)
+        config.password_encrypted = vault.encrypt(password)
+
+    for field, value in update_data.items():
+        setattr(config, field, value)
+
+    await db.commit()
+    await db.refresh(config)
 
     return ok(SmtpConfigResponse(
-        host=existing.get("host"),
-        port=existing.get("port"),
-        username=existing.get("username"),
-        use_tls=existing.get("use_tls", True),
-        from_address=existing.get("from_address"),
+        host=config.host,
+        port=config.port,
+        username=config.username,
+        use_tls=config.use_tls if config.use_tls is not None else True,
+        from_address=config.from_address,
     ))
 
 
@@ -215,3 +239,64 @@ async def update_daily_notification_config(
         created_at=config.created_at,
         updated_at=config.updated_at,
     ))
+
+
+# --- Notification Triggers (DB-backed: 07_データベーススキーマ §3-4) ---
+
+_DEFAULT_TRIGGERS = [
+    "notifyOnEntry", "notifyOnExit", "notifyOnGuardHalt",
+    "notifyOnDailyReport", "notifyOnError",
+]
+
+
+@router.get("/triggers")
+async def get_trigger_configs(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """通知トリガー設定一覧."""
+    q = select(NotificationTriggerConfig).where(
+        NotificationTriggerConfig.user_id == user.id,
+    )
+    result = await db.execute(q)
+    configs = result.scalars().all()
+
+    config_map = {c.trigger_key: c.enabled for c in configs}
+
+    items = [
+        TriggerConfigItem(
+            trigger_key=key,
+            enabled=config_map.get(key, True),
+        )
+        for key in _DEFAULT_TRIGGERS
+    ]
+    return ok(items)
+
+
+@router.put("/triggers")
+async def update_trigger_configs(
+    req: TriggerConfigUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """通知トリガー設定一括更新."""
+    for item in req.triggers:
+        q = select(NotificationTriggerConfig).where(
+            NotificationTriggerConfig.user_id == user.id,
+            NotificationTriggerConfig.trigger_key == item.trigger_key,
+        )
+        result = await db.execute(q)
+        config = result.scalar_one_or_none()
+
+        if config is None:
+            config = NotificationTriggerConfig(
+                user_id=user.id,
+                trigger_key=item.trigger_key,
+            )
+            db.add(config)
+
+        config.enabled = item.enabled
+
+    await db.commit()
+
+    return ok({"updated": len(req.triggers)})

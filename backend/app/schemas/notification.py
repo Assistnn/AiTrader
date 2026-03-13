@@ -80,3 +80,20 @@ class DailyNotificationConfigUpdateRequest(BaseModel):
     include_pnl: bool | None = Field(None, alias="includePnl")
     include_trades: bool | None = Field(None, alias="includeTrades")
     include_guards: bool | None = Field(None, alias="includeGuards")
+
+
+class TriggerConfigItem(BaseModel):
+    """Notification trigger config item."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    trigger_key: str = Field(alias="triggerKey")
+    enabled: bool
+
+
+class TriggerConfigUpdateRequest(BaseModel):
+    """PUT /api/v1/notifications/triggers リクエスト."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    triggers: list[TriggerConfigItem]

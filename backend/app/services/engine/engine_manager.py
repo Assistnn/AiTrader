@@ -125,7 +125,10 @@ class EngineManager:
             bar_scheduler = BarConfirmationScheduler()
             market_data_feed = MarketDataFeed(data_provider)
 
-            # Create a minimal orchestrator (full integration needs DB-loaded judges)
+            # Load judge configs from DB (16書§7-4)
+            judge_configs = await self._load_judge_configs(trader_id)
+
+            # Create orchestrator with AI helper if API keys available
             orchestrator = self._create_orchestrator(trader_config or {})
 
             # Create indicator engine and state builder for pipeline state
@@ -149,6 +152,7 @@ class EngineManager:
                 indicator_engine=indicator_engine,
                 state_builder=state_builder,
                 user_id=user_id,
+                judge_configs=judge_configs,
             )
 
             self._engines[trader_id] = engine
@@ -313,6 +317,39 @@ class EngineManager:
             trader_id, max_retries,
         )
 
+    async def _load_judge_configs(self, trader_id: int) -> dict[str, dict]:
+        """Load JudgeConfig from DB model_stage_configs for a trader.
+
+        Reference: 16書§7-4
+        Returns dict like {"m1": {...}, "m2": {...}, "m3": {...}, "m4": {...}}
+        """
+        from app.db.session import async_session_factory
+        from sqlalchemy import select
+        from app.models.model_stage_config import ModelStageConfig
+
+        configs: dict[str, dict] = {}
+        try:
+            async with async_session_factory() as session:
+                q = select(ModelStageConfig).where(
+                    ModelStageConfig.trader_id == trader_id,
+                )
+                result = await session.execute(q)
+                for msc in result.scalars().all():
+                    configs[msc.stage] = msc.config_json or {}
+            if configs:
+                logger.info(
+                    "Loaded judge configs from DB for trader %d: stages=%s",
+                    trader_id, list(configs.keys()),
+                )
+            else:
+                logger.info(
+                    "No judge configs in DB for trader %d, using defaults",
+                    trader_id,
+                )
+        except Exception:
+            logger.exception("Failed to load judge configs from DB for trader %d", trader_id)
+        return configs
+
     def _register_price_broadcast(
         self,
         market_data_feed: Any,
@@ -339,9 +376,9 @@ class EngineManager:
         market_data_feed.add_on_tick(_broadcast_tick)
 
     def _create_orchestrator(self, config: dict) -> DecisionOrchestrator:
-        """Create a DecisionOrchestrator with default judges.
+        """Create a DecisionOrchestrator with AI helper if API keys available.
 
-        In full integration, judges are loaded from DB per trader config.
+        Reference: 16書§7-4, 05_AI統合
         """
         from app.services.decision.orchestrator import DecisionOrchestrator
         from app.services.decision.m1_direction import M1DirectionJudge
@@ -350,11 +387,65 @@ class EngineManager:
         from app.services.decision.m4_exit import M4ExitJudge
         from app.services.safeguard.guard_engine import GuardEngine
 
+        ai_helper = self._create_ai_helper()
+
         guard_engine = GuardEngine()
         return DecisionOrchestrator(
-            m1=M1DirectionJudge(),
-            m2=M2SetupJudge(),
-            m3=M3EntryJudge(),
-            m4=M4ExitJudge(),
+            m1=M1DirectionJudge(ai_helper=ai_helper),
+            m2=M2SetupJudge(ai_helper=ai_helper),
+            m3=M3EntryJudge(ai_helper=ai_helper),
+            m4=M4ExitJudge(ai_helper=ai_helper),
             guard_engine=guard_engine,
         )
+
+    def _create_ai_helper(self) -> Any:
+        """Create AIJudgeHelper from environment API keys.
+
+        Reference: 05_AI統合, 16書§7-4
+        Returns AIJudgeHelper or None if no API keys configured.
+        """
+        from app.services.ai.provider_factory import create_provider
+        from app.services.ai.judge_helper import AIJudgeHelper
+        from app.services.ai.rate_limiter import AIRateLimiter
+        from app.services.ai.budget_tracker import BudgetTracker
+
+        provider_name = settings.AI_DEFAULT_PROVIDER
+        api_key = ""
+        if provider_name == "openai":
+            api_key = settings.OPENAI_API_KEY
+        elif provider_name == "gemini":
+            api_key = settings.GEMINI_API_KEY
+        elif provider_name == "claude":
+            api_key = settings.CLAUDE_API_KEY
+
+        if not api_key:
+            logger.warning(
+                "AI API key not configured for provider '%s'. "
+                "AI judge modes (aiAssist/aiFull) will fall back to rule mode.",
+                provider_name,
+            )
+            return None
+
+        try:
+            provider = create_provider(
+                provider_name=provider_name,
+                api_key=api_key,
+                model=settings.AI_DEFAULT_MODEL,
+            )
+            rate_limiter = AIRateLimiter(
+                per_trader_limit=settings.AI_RATE_LIMIT_PER_TRADER,
+                global_limit=settings.AI_RATE_LIMIT_GLOBAL,
+            )
+            budget_tracker = BudgetTracker(
+                daily_token_budget=settings.AI_DAILY_TOKEN_BUDGET,
+                warning_pct=settings.AI_BUDGET_WARNING_PCT,
+            )
+            logger.info("AI helper initialized: provider=%s, model=%s", provider_name, settings.AI_DEFAULT_MODEL)
+            return AIJudgeHelper(
+                provider=provider,
+                rate_limiter=rate_limiter,
+                budget_tracker=budget_tracker,
+            )
+        except Exception:
+            logger.exception("Failed to initialize AI helper, falling back to rule mode")
+            return None

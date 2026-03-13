@@ -94,22 +94,34 @@ async def lifespan(app: FastAPI):
                     ec_map[(ec.user_id, ec.exchange_type)] = ec
 
                 for t in traders:
-                    exchange_type = "gmo_fx" if t.trade_type == "FX" else "bitbank"
-                    ec = ec_map.get((t.user_id, exchange_type))
-                    api_key = vault.decrypt(ec.api_key_encrypted) if ec else ""
-                    api_secret = vault.decrypt(ec.api_secret_encrypted) if ec else ""
-                    pair = t.symbols[0] if t.symbols else "USD_JPY"
-                    running_traders.append({
-                        "id": t.id,
-                        "pair": pair,
-                        "trade_type": t.trade_type,
-                        "api_key": api_key,
-                        "api_secret": api_secret,
-                        "config": {},
-                    })
+                    try:
+                        exchange_type = "gmo_fx" if t.trade_type == "FX" else "bitbank"
+                        ec = ec_map.get((t.user_id, exchange_type))
+                        api_key = vault.decrypt(ec.api_key_encrypted) if ec else ""
+                        api_secret = vault.decrypt(ec.api_secret_encrypted) if ec else ""
+                        pair = t.symbols[0] if t.symbols else "USD_JPY"
+                        running_traders.append({
+                            "id": t.id,
+                            "pair": pair,
+                            "trade_type": t.trade_type,
+                            "api_key": api_key,
+                            "api_secret": api_secret,
+                            "user_id": t.user_id,
+                            "config": {},
+                        })
+                    except Exception:
+                        _logger.exception(
+                            "Failed to load trader %d (user_id=%d): key decryption or config error",
+                            t.id, t.user_id,
+                        )
+            else:
+                _logger.info("No running traders found in DB")
     except Exception:
-        import logging
-        logging.getLogger(__name__).exception("Failed to load running traders on startup")
+        _logger.critical(
+            "CRITICAL: Failed to load running traders from DB on startup. "
+            "Engines will start without auto-restore.",
+            exc_info=True,
+        )
 
     await engine_manager.startup(running_traders if running_traders else None)
 

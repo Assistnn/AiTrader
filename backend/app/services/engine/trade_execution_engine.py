@@ -83,6 +83,7 @@ class TradeExecutionEngine:
         indicator_engine: IndicatorEngine | None = None,
         state_builder: StateBuilder | None = None,
         user_id: int = 0,
+        judge_configs: dict[str, dict] | None = None,
     ) -> None:
         self.trader_id = trader_id
         self.user_id = user_id
@@ -97,6 +98,7 @@ class TradeExecutionEngine:
         self.trader_config = trader_config or {}
         self._indicator_engine = indicator_engine or IndicatorEngine()
         self._state_builder = state_builder or StateBuilder()
+        self._judge_configs = judge_configs or {}
 
         self._lock = asyncio.Lock()  # pipeline execution lock
         self._exit_lock = asyncio.Lock()  # separate lock for M4 (16書§5-4)
@@ -276,16 +278,54 @@ class TradeExecutionEngine:
                 async with self._exit_lock:
                     await self._run_m4(event, positions)
 
+    def _get_judge_config(self, stage: str) -> "JudgeConfig | None":
+        """Build JudgeConfig from DB-loaded config for a stage.
+
+        Reference: 16書§7-4
+        Returns None if no DB config (orchestrator will use defaults).
+        """
+        from app.services.decision.decision_types import JudgeConfig
+
+        raw = self._judge_configs.get(stage)
+        if not raw:
+            return None
+        return JudgeConfig(
+            enabled=raw.get("enabled", True),
+            mode=raw.get("mode", "rule"),
+            timeframes=raw.get("timeframes", ["H1"]),
+            params={k: v for k, v in raw.items() if k not in ("enabled", "mode", "timeframes")},
+        )
+
+    async def _reload_judge_configs(self) -> None:
+        """Reload judge configs from DB. Reference: 16書§7-3"""
+        from app.models.model_stage_config import ModelStageConfig
+        from sqlalchemy import select
+
+        try:
+            async with async_session_factory() as session:
+                q = select(ModelStageConfig).where(
+                    ModelStageConfig.trader_id == self.trader_id,
+                )
+                result = await session.execute(q)
+                new_configs: dict[str, dict] = {}
+                for msc in result.scalars().all():
+                    new_configs[msc.stage] = msc.config_json or {}
+                self._judge_configs = new_configs
+                logger.info(
+                    "Engine[%d] reloaded judge configs: stages=%s",
+                    self.trader_id, list(new_configs.keys()),
+                )
+        except Exception:
+            logger.exception("Engine[%d] failed to reload judge configs", self.trader_id)
+
     async def _run_m1(self, event: BarClosedEvent) -> None:
         """Execute M1 direction judgment and cache result."""
         logger.info("Engine[%d] M1 executing for %s", self.trader_id, event.pair)
-        # The full pipeline's M1 result will be extracted from PipelineResult
-        # For caching, we run just M1 via orchestrator
-        # Since orchestrator runs full pipeline, we use a simplified approach
         result = await self.orchestrator.execute_pipeline(
             pair=event.pair,
             state=self._build_state(event),
             trader_id=self.trader_id,
+            m1_config=self._get_judge_config("m1"),
         )
 
         if result.m1_output:
@@ -309,6 +349,7 @@ class TradeExecutionEngine:
             pair=event.pair,
             state=self._build_state(event),
             trader_id=self.trader_id,
+            m2_config=self._get_judge_config("m2"),
         )
 
         if result.m2_output:
@@ -336,6 +377,9 @@ class TradeExecutionEngine:
             pair=event.pair,
             state=self._build_state(event),
             trader_id=self.trader_id,
+            m1_config=self._get_judge_config("m1"),
+            m2_config=self._get_judge_config("m2"),
+            m3_config=self._get_judge_config("m3"),
         )
 
         if result.action == "ENTRY" and result.order:
@@ -397,6 +441,7 @@ class TradeExecutionEngine:
             state=self._build_state(event),
             positions=positions,
             trader_id=self.trader_id,
+            m4_config=self._get_judge_config("m4"),
         )
 
         raw_action = m4_output.result.get("action", "HOLD")
@@ -533,12 +578,11 @@ class TradeExecutionEngine:
             try:
                 event = self._config_queue.get_nowait()
                 logger.info(
-                    "Engine[%d] applying config change: %s",
-                    self.trader_id, event.config_type,
+                    "Engine[%d] applying config change: %s (stage=%s)",
+                    self.trader_id, event.config_type, event.stage,
                 )
-                # Config changes are applied at the next pipeline execution
-                # by reloading judge configs from DB.
-                # The Orchestrator picks up configs at execution time.
+                if event.config_type == "model_stage":
+                    await self._reload_judge_configs()
             except asyncio.QueueEmpty:
                 break
 

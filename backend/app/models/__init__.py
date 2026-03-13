@@ -10,7 +10,7 @@ from app.models.exchange_config import ExchangeConfig
 from app.models.historical_ohlcv import HistoricalOhlcv
 from app.models.market_watch_config import MarketWatchConfig
 from app.models.model_stage_config import ModelStageConfig
-from app.models.notification import DailyNotificationConfig, NotificationEmail
+from app.models.notification import DailyNotificationConfig, NotificationEmail, NotificationTriggerConfig, SmtpConfig
 from app.models.pipeline_log import PipelineLog
 from app.models.position import Position
 from app.models.safeguard_config import SafeguardConfig
@@ -37,6 +37,8 @@ __all__ = [
     "SystemDefaultPrompt",
     "NotificationEmail",
     "DailyNotificationConfig",
+    "SmtpConfig",
+    "NotificationTriggerConfig",
     "MarketWatchConfig",
     "ChartConfig",
     "HistoricalOhlcv",
