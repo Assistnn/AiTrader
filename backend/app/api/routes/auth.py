@@ -26,10 +26,14 @@ from app.services.auth.jwt_handler import (
 )
 from app.api.response import ok
 
+from app.config import settings
+
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 REFRESH_COOKIE_NAME = "refresh_token"
+# Secure flag: only True when HTTPS is available
+_COOKIE_SECURE = settings.COOKIE_SECURE
 REFRESH_COOKIE_MAX_AGE = REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60  # seconds
 
 
@@ -40,7 +44,7 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
         value=token,
         max_age=REFRESH_COOKIE_MAX_AGE,
         httponly=True,
-        secure=True,
+        secure=_COOKIE_SECURE,
         samesite="lax",
         path="/api/v1/auth",
     )
@@ -51,7 +55,7 @@ def _clear_refresh_cookie(response: Response) -> None:
     response.delete_cookie(
         key=REFRESH_COOKIE_NAME,
         httponly=True,
-        secure=True,
+        secure=_COOKIE_SECURE,
         samesite="lax",
         path="/api/v1/auth",
     )

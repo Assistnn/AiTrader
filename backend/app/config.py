@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     # --- CORS ---
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
+    # --- Cookie ---
+    COOKIE_SECURE: bool = False  # Set True when HTTPS is available
+
     # --- Logging ---
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = "logs"
