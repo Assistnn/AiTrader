@@ -54,7 +54,7 @@ function ExchangeSettings() {
   const [forms, setForms] = useState<
     Record<string, { apiKey: string; apiSecret: string }>
   >({
-    gmo: { apiKey: "", apiSecret: "" },
+    gmo_fx: { apiKey: "", apiSecret: "" },
     bitbank: { apiKey: "", apiSecret: "" },
   });
 
