@@ -11,6 +11,9 @@ from typing import TYPE_CHECKING
 
 from app.services.decision.base_judge import BaseJudge
 from app.services.decision.decision_types import JudgeConfig, JudgeInput, JudgeOutput
+from app.services.exchange.price_normalizer import PriceNormalizer
+
+_normalizer = PriceNormalizer()
 
 if TYPE_CHECKING:
     from app.services.ai.judge_helper import AIJudgeHelper
@@ -150,14 +153,37 @@ class M3EntryJudge(BaseJudge):
         tp_sl_mode = config.params.get("tpSlMode", "atr")
         entry_type = config.params.get("orderType", "market")
 
-        if tp_sl_mode == "atr" and atr is not None and atr > 0:
+        # Resolve pip definition from PriceNormalizer (設計書§5-4)
+        pair = input.pair
+        pip_def = _normalizer.PIP_DEFINITIONS.get(pair)
+        if pip_def is None:
+            logger.warning(
+                "M3 PriceNormalizer: pair=%s not found, using fixedPips fallback",
+                pair,
+            )
+
+        if tp_sl_mode == "atr" and atr is not None and atr > 0 and pip_def is not None:
             tp_mult = config.params.get("tpMultiplier", 1.5)
             sl_mult = config.params.get("slMultiplier", 1.0)
-            # Convert ATR to approximate pips (100 for JPY pairs)
-            atr_pips = atr * 100
+            # Convert ATR to pips via PriceNormalizer (設計書§5-4)
+            atr_pips = _normalizer.to_pips(atr, pair)
             tp_pips = atr_pips * tp_mult
             sl_pips = atr_pips * sl_mult
             reason_codes.append("TP_SL_ATR_MODE")
+
+            # --- Anomaly guard (設計書§5-4a) ---
+            if atr_pips > 100_000:
+                logger.warning(
+                    "M3 ANOMALY_GUARD: atr_pips=%.1f exceeds 100,000 for pair=%s (atr=%.6f)",
+                    atr_pips, pair, atr,
+                )
+                return JudgeOutput(
+                    result={"entry": "NO_TRADE", "entryType": "market", "lotSize": 0.0,
+                            "tpPips": 0.0, "slPips": 0.0, "rrRatio": 0.0},
+                    confidence=0.0,
+                    reason_codes=["ANOMALY_GUARD_BLOCK"],
+                    _debug={"atr_pips": atr_pips, "pair": pair, "atr": atr},
+                )
         else:
             # Fixed pips fallback
             tp_pips = config.params.get("tpFixedPips", 30.0)
@@ -169,7 +195,9 @@ class M3EntryJudge(BaseJudge):
         # --- Position sizing (Reference: Section 5-5) ---
         risk_pct = config.params.get("riskPerTradePct", 2.0)
         capital = input.account.capital if input.account else 1_000_000.0
-        pip_value = config.params.get("pipValue", 100.0)  # approximate JPY pairs
+        # pip_value from PriceNormalizer, with config override (設計書§5-5)
+        default_pip_value = pip_def["pip_value_per_lot"] if pip_def else 100.0
+        pip_value = config.params.get("pipValue", default_pip_value)
         min_lot = config.params.get("minLot", 0.01)
         max_lot = config.params.get("maxLot", 100.0)
 

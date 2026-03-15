@@ -685,3 +685,195 @@ class TestBaseJudgeConformance:
         input = _judge_input(positions=[pos])
         output = await judge.judge(input, config)
         assert isinstance(output._debug, dict)
+
+
+# ===========================================================================
+# PriceNormalizer Integration: FX vs Crypto pips calculation (監査対応)
+# ===========================================================================
+
+
+class TestM3CryptoPipsCalculation:
+    """Verify M3 uses PriceNormalizer instead of hardcoded atr*100."""
+
+    @pytest.mark.asyncio
+    async def test_btc_jpy_atr_pips(self):
+        """BTC_JPY: ATR=10000 → atr_pips=10000 (pip_size=1), NOT 10000*100."""
+        judge = M3EntryJudge()
+        config = JudgeConfig(timeframes=["M5"], params={"tpMultiplier": 1.5, "slMultiplier": 1.0})
+        m1_output = JudgeOutput(result={"trend": "UP"}, confidence=0.8)
+        m2_output = JudgeOutput(result={"setupValid": True, "setupType": "trendFollow"}, confidence=0.7)
+        state = _state(pair="BTC_JPY", atr14=10000.0)
+        account = AccountState(
+            capital=1_000_000, daily_realized_pnl=0, daily_unrealized_pnl=0,
+            monthly_pnl=0, peak_capital=1_000_000, current_capital=1_000_000,
+            consecutive_losses=0, last_trade_was_loss=False, daily_profit_pct=0,
+        )
+        input = JudgeInput(
+            pair="BTC_JPY", timestamp=NOW, state=state,
+            guard_state=_guard_state(),
+            previous_stages={"m1": m1_output, "m2": m2_output},
+            account=account,
+        )
+        output = await judge.judge(input, config)
+        assert output.result["entry"] == "BUY"
+        # ATR=10000, pip_size=1 → atr_pips=10000, tp=15000, sl=10000
+        assert output.result["tpPips"] == pytest.approx(15000.0)
+        assert output.result["slPips"] == pytest.approx(10000.0)
+
+    @pytest.mark.asyncio
+    async def test_eth_jpy_atr_pips(self):
+        """ETH_JPY: ATR=1000 → atr_pips=1000 (pip_size=1), NOT 1000*100."""
+        judge = M3EntryJudge()
+        config = JudgeConfig(timeframes=["M5"], params={"tpMultiplier": 1.5, "slMultiplier": 1.0})
+        m1_output = JudgeOutput(result={"trend": "DOWN"}, confidence=0.8)
+        m2_output = JudgeOutput(result={"setupValid": True, "setupType": "trendFollow"}, confidence=0.7)
+        state = _state(pair="ETH_JPY", atr14=1000.0)
+        input = JudgeInput(
+            pair="ETH_JPY", timestamp=NOW, state=state,
+            guard_state=_guard_state(),
+            previous_stages={"m1": m1_output, "m2": m2_output},
+        )
+        output = await judge.judge(input, config)
+        assert output.result["entry"] == "SELL"
+        assert output.result["tpPips"] == pytest.approx(1500.0)
+        assert output.result["slPips"] == pytest.approx(1000.0)
+
+    @pytest.mark.asyncio
+    async def test_usd_jpy_unchanged(self):
+        """USD_JPY: ATR=0.5 → atr_pips=50 (pip_size=0.01) — same as before."""
+        judge = M3EntryJudge()
+        config = JudgeConfig(timeframes=["M5"], params={"tpMultiplier": 1.5, "slMultiplier": 1.0})
+        m1_output = JudgeOutput(result={"trend": "UP"}, confidence=0.8)
+        m2_output = JudgeOutput(result={"setupValid": True, "setupType": "trendFollow"}, confidence=0.7)
+        state = _state(pair="USD_JPY", atr14=0.5)
+        input = JudgeInput(
+            pair="USD_JPY", timestamp=NOW, state=state,
+            guard_state=_guard_state(),
+            previous_stages={"m1": m1_output, "m2": m2_output},
+        )
+        output = await judge.judge(input, config)
+        assert output.result["entry"] == "BUY"
+        assert output.result["tpPips"] == pytest.approx(75.0)  # 0.5/0.01 * 1.5
+        assert output.result["slPips"] == pytest.approx(50.0)  # 0.5/0.01 * 1.0
+
+    @pytest.mark.asyncio
+    async def test_anomaly_guard_blocks_extreme_atr_pips(self):
+        """Anomaly guard: atr_pips > 100,000 → NO_TRADE."""
+        judge = M3EntryJudge()
+        config = JudgeConfig(timeframes=["M5"])
+        m1_output = JudgeOutput(result={"trend": "UP"}, confidence=0.8)
+        m2_output = JudgeOutput(result={"setupValid": True, "setupType": "trendFollow"}, confidence=0.7)
+        # XRP_JPY pip_size=0.001, ATR=200 → atr_pips=200,000 → blocked
+        state = _state(pair="XRP_JPY", atr14=200.0)
+        input = JudgeInput(
+            pair="XRP_JPY", timestamp=NOW, state=state,
+            guard_state=_guard_state(),
+            previous_stages={"m1": m1_output, "m2": m2_output},
+        )
+        output = await judge.judge(input, config)
+        assert output.result["entry"] == "NO_TRADE"
+        assert "ANOMALY_GUARD_BLOCK" in output.reason_codes
+
+    @pytest.mark.asyncio
+    async def test_unknown_pair_falls_back_to_fixed_pips(self):
+        """Unknown pair: PriceNormalizer miss → fixedPips fallback."""
+        judge = M3EntryJudge()
+        config = JudgeConfig(timeframes=["M5"], params={"tpFixedPips": 40.0, "slFixedPips": 25.0})
+        m1_output = JudgeOutput(result={"trend": "UP"}, confidence=0.8)
+        m2_output = JudgeOutput(result={"setupValid": True, "setupType": "trendFollow"}, confidence=0.7)
+        state = _state(pair="UNKNOWN_PAIR", atr14=0.5)
+        input = JudgeInput(
+            pair="UNKNOWN_PAIR", timestamp=NOW, state=state,
+            guard_state=_guard_state(),
+            previous_stages={"m1": m1_output, "m2": m2_output},
+        )
+        output = await judge.judge(input, config)
+        assert output.result["entry"] == "BUY"
+        assert output.result["tpPips"] == pytest.approx(40.0)
+        assert output.result["slPips"] == pytest.approx(25.0)
+        assert "TP_SL_FIXED_MODE" in output.reason_codes
+
+    @pytest.mark.asyncio
+    async def test_btc_jpy_pip_value_from_normalizer(self):
+        """BTC_JPY: pip_value should be 1 (not hardcoded 100)."""
+        judge = M3EntryJudge()
+        config = JudgeConfig(timeframes=["M5"], params={
+            "tpMultiplier": 1.5, "slMultiplier": 1.0,
+            "riskPerTradePct": 2.0, "minLot": 0.001, "maxLot": 10.0,
+        })
+        m1_output = JudgeOutput(result={"trend": "UP"}, confidence=0.8)
+        m2_output = JudgeOutput(result={"setupValid": True, "setupType": "trendFollow"}, confidence=0.7)
+        state = _state(pair="BTC_JPY", atr14=10000.0)
+        account = AccountState(
+            capital=1_000_000, daily_realized_pnl=0, daily_unrealized_pnl=0,
+            monthly_pnl=0, peak_capital=1_000_000, current_capital=1_000_000,
+            consecutive_losses=0, last_trade_was_loss=False, daily_profit_pct=0,
+        )
+        input = JudgeInput(
+            pair="BTC_JPY", timestamp=NOW, state=state,
+            guard_state=_guard_state(),
+            previous_stages={"m1": m1_output, "m2": m2_output},
+            account=account,
+        )
+        output = await judge.judge(input, config)
+        # pip_value_per_lot = 1 (BTC_JPY)
+        # risk = 1M * 2% = 20,000
+        # sl_pips = 10000
+        # raw_lot = 20,000 / (10,000 * 1) = 2.0
+        assert output.result["lotSize"] == pytest.approx(2.0)
+
+
+class TestM4CryptoPipsCalculation:
+    """Verify M4 uses PriceNormalizer instead of hardcoded atr*100."""
+
+    def _make_position(self, **overrides):
+        from types import SimpleNamespace
+        defaults = dict(
+            pair="BTC_JPY", side="BUY", entry_price=5_000_000.0,
+            current_price=5_010_000.0, tp_price=5_050_000.0, sl_price=4_950_000.0,
+            opened_at=NOW, break_even_applied=False,
+            trail_active=False, trail_price=None,
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    @pytest.mark.asyncio
+    async def test_btc_jpy_unrealized_pnl_pips(self):
+        """BTC_JPY: (5,010,000 - 5,000,000)/1 = 10,000 pips, NOT *100."""
+        judge = M4ExitJudge()
+        config = JudgeConfig(timeframes=["M5"], params={
+            "breakEven": True, "breakevenTriggerMultiplier": 1.0,
+            "trailing": False, "partial": False, "maxHold": False,
+        })
+        # atr14=10000 → atr_pips = 10000/1 = 10000
+        # unrealized = (5010000-5000000)/1 = 10000 pips
+        # 10000 >= 10000 * 1.0 → break-even triggered
+        pos = self._make_position()
+        state = _state(pair="BTC_JPY", atr14=10000.0)
+        input = JudgeInput(
+            pair="BTC_JPY", timestamp=NOW, state=state,
+            guard_state=_guard_state(), positions=[pos],
+        )
+        output = await judge.judge(input, config)
+        assert output.result["action"] == "ADJUST_TRAIL"
+        assert "BREAK_EVEN_TRIGGERED" in output.reason_codes
+
+    @pytest.mark.asyncio
+    async def test_btc_jpy_hold_small_profit(self):
+        """BTC_JPY: small profit should HOLD."""
+        judge = M4ExitJudge()
+        config = JudgeConfig(timeframes=["M5"], params={
+            "breakEven": True, "breakevenTriggerMultiplier": 1.0,
+            "trailing": True, "trailStartMultiplier": 1.5,
+            "partial": False, "maxHold": False,
+        })
+        # atr14=10000 → atr_pips=10000
+        # unrealized = (5001000-5000000)/1 = 1000 pips < 10000
+        pos = self._make_position(current_price=5_001_000.0)
+        state = _state(pair="BTC_JPY", atr14=10000.0)
+        input = JudgeInput(
+            pair="BTC_JPY", timestamp=NOW, state=state,
+            guard_state=_guard_state(), positions=[pos],
+        )
+        output = await judge.judge(input, config)
+        assert output.result["action"] == "HOLD"

@@ -19,6 +19,7 @@ from app.api.routes.auth import limiter, router as auth_router
 
 logger = logging.getLogger(__name__)
 from app.api.routes.account import router as account_router
+from app.api.routes.asset_profiles import router as asset_profiles_router
 from app.api.routes.backtests import router as backtests_router
 from app.api.routes.charts import router as charts_router
 from app.api.routes.config_changes import router as config_changes_router
@@ -59,6 +60,10 @@ async def lifespan(app: FastAPI):
         "Application starting",
         extra={"data": {"trading_mode": settings.TRADING_MODE.value, "log_level": settings.LOG_LEVEL}},
     )
+
+    # Load asset profiles from DB into PriceNormalizer (監査対応: 設定のみで新ペア追加)
+    from app.services.exchange.price_normalizer import PriceNormalizer
+    await PriceNormalizer.load_from_db()
 
     from app.services.engine.engine_manager import EngineManager
 
@@ -201,6 +206,7 @@ app.include_router(pipeline_logs_router)
 app.include_router(config_changes_router)
 app.include_router(settings_router)
 app.include_router(websocket_router)
+app.include_router(asset_profiles_router)
 
 
 @app.get("/health")

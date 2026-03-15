@@ -960,8 +960,10 @@ class InternalPositionSizeCheck(BaseGuard):
             return self._pass(now)
 
         # risk_amount = lot_size * sl_pips * pip_value
-        # Simplified: pip_value ≈ 100 for JPY pairs (0.01 * 10000)
-        pip_value = 100.0  # approximate for JPY pairs
+        # Use PriceNormalizer for accurate pip_value per pair (監査指摘対応)
+        from app.services.exchange.price_normalizer import PriceNormalizer
+        pip_def = PriceNormalizer.PIP_DEFINITIONS.get(proposed_order.pair)
+        pip_value = pip_def["pip_value_per_lot"] if pip_def else 100.0
         risk_amount = proposed_order.lot_size * proposed_order.sl_pips * pip_value
         risk_pct = risk_amount / capital * 100
 

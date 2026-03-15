@@ -1,6 +1,7 @@
 """SQLAlchemy models. All models must be imported here for Alembic discovery."""
 
 from app.models.ai_decision_log import AiDecisionLog
+from app.models.asset_profile import AssetProfile
 from app.models.ai_model_config import AiModelConfig
 from app.models.backtest import BacktestRun, BacktestTrade
 from app.models.chart_config import ChartConfig
@@ -46,4 +47,5 @@ __all__ = [
     "BacktestTrade",
     "SimulationHistory",
     "EconomicEvent",
+    "AssetProfile",
 ]

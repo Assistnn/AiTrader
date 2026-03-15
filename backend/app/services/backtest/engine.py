@@ -210,7 +210,9 @@ class BacktestEngine:
 
         sl_price = None
         tp_price = None
-        pip_size = 0.01 if "JPY" in config.pair else 0.0001
+        from app.services.exchange.price_normalizer import PriceNormalizer
+        pip_def = PriceNormalizer.PIP_DEFINITIONS.get(config.pair)
+        pip_size = pip_def["pip_size"] if pip_def else (0.01 if "JPY" in config.pair else 0.0001)
         if order.sl_pips:
             if order.side == "BUY":
                 sl_price = entry_price - order.sl_pips * pip_size
@@ -257,8 +259,10 @@ class BacktestEngine:
         recorder: BacktestRecorder,
     ) -> None:
         """退出を記録."""
-        pip_size = 0.01 if "JPY" in config.pair else 0.0001
-        pip_value = 100.0 if "JPY" in config.pair else 10.0  # per lot
+        from app.services.exchange.price_normalizer import PriceNormalizer
+        pip_def = PriceNormalizer.PIP_DEFINITIONS.get(config.pair)
+        pip_size = pip_def["pip_size"] if pip_def else (0.01 if "JPY" in config.pair else 0.0001)
+        pip_value = pip_def["pip_value_per_lot"] if pip_def else (100.0 if "JPY" in config.pair else 10.0)
 
         if pos["side"] == "BUY":
             pnl_pips = (exit_price - pos["entry_price"]) / pip_size
@@ -316,6 +320,8 @@ class BacktestEngine:
 
     def _slippage(self, side: str, config: BacktestConfig) -> float:
         """スリッページ計算."""
-        pip_size = 0.01 if "JPY" in config.pair else 0.0001
+        from app.services.exchange.price_normalizer import PriceNormalizer
+        pip_def = PriceNormalizer.PIP_DEFINITIONS.get(config.pair)
+        pip_size = pip_def["pip_size"] if pip_def else (0.01 if "JPY" in config.pair else 0.0001)
         slip = config.slippage_pips * pip_size
         return slip if side == "BUY" else -slip

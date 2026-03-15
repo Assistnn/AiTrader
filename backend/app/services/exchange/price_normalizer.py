@@ -2,15 +2,23 @@
 PriceNormalizer: FX (pip) / Crypto (decimal) price unit normalization.
 
 Reference: 06_取引所抽象化 Section 3
+
+Pip definitions are loaded from asset_profiles DB table at startup.
+Hardcoded PIP_DEFINITIONS serve as fallback when DB is unavailable.
 """
 
 from __future__ import annotations
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class PriceNormalizer:
     """Price unit normalization. Reference: Section 3"""
 
-    # Pip definition table. Reference: Section 3-2
+    # Hardcoded fallback pip definitions. Reference: Section 3-2
+    # These are overridden by DB asset_profiles when load_from_db() is called.
     PIP_DEFINITIONS: dict[str, dict] = {
         # FX
         "USD_JPY": {"pip_size": 0.01, "pip_digits": 2, "pip_value_per_lot": 100},
@@ -29,6 +37,38 @@ class PriceNormalizer:
         "ETH_JPY": {"pip_size": 1, "pip_digits": 0, "pip_value_per_lot": 1},
         "XRP_JPY": {"pip_size": 0.001, "pip_digits": 3, "pip_value_per_lot": 1000},
     }
+
+    @classmethod
+    async def load_from_db(cls) -> int:
+        """Load pip definitions from asset_profiles DB table.
+
+        Merges DB records into PIP_DEFINITIONS (DB takes precedence).
+        Returns number of profiles loaded.
+        """
+        try:
+            from sqlalchemy import select
+            from app.db.session import async_session_factory
+            from app.models.asset_profile import AssetProfile
+
+            async with async_session_factory() as session:
+                result = await session.execute(select(AssetProfile))
+                profiles = result.scalars().all()
+
+            count = 0
+            for p in profiles:
+                cls.PIP_DEFINITIONS[p.pair] = {
+                    "pip_size": float(p.pip_size),
+                    "pip_digits": p.pip_digits,
+                    "pip_value_per_lot": float(p.pip_value_per_lot),
+                }
+                count += 1
+
+            if count > 0:
+                logger.info("PriceNormalizer loaded %d asset profiles from DB", count)
+            return count
+        except Exception:
+            logger.warning("PriceNormalizer: failed to load from DB, using hardcoded fallback")
+            return 0
 
     def get_pip_definition(self, pair: str) -> dict:
         """Get pip definition for a pair. Raises KeyError for unknown pairs."""

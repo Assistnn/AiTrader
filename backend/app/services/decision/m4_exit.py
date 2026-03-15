@@ -13,6 +13,9 @@ from typing import TYPE_CHECKING
 
 from app.services.decision.base_judge import BaseJudge
 from app.services.decision.decision_types import JudgeConfig, JudgeInput, JudgeOutput
+from app.services.exchange.price_normalizer import PriceNormalizer
+
+_normalizer = PriceNormalizer()
 
 if TYPE_CHECKING:
     from app.services.ai.judge_helper import AIJudgeHelper
@@ -171,7 +174,14 @@ class M4ExitJudge(BaseJudge):
         if params.get("partial", True) and position_ctx.tp_price is not None:
             partial_trigger = params.get("partialTriggerPct", 0.5)
             partial_close = params.get("partialClosePct", 0.5)
-            tp_distance_pips = abs(position_ctx.tp_price - position_ctx.entry_price) * 100
+            pair = position_ctx.pair
+            pip_def = _normalizer.PIP_DEFINITIONS.get(pair)
+            if pip_def is not None:
+                tp_distance_pips = _normalizer.to_pips(
+                    abs(position_ctx.tp_price - position_ctx.entry_price), pair,
+                )
+            else:
+                tp_distance_pips = abs(position_ctx.tp_price - position_ctx.entry_price) * 100
             if tp_distance_pips > 0:
                 progress = position_ctx.unrealized_pnl_pips / tp_distance_pips
                 debug["tp_progress"] = progress
@@ -208,21 +218,34 @@ class M4ExitJudge(BaseJudge):
         # Get ATR from primary timeframe
         primary_tf = config.timeframes[0] if config.timeframes else "M5"
         primary = input.state.indicators.get(primary_tf)
+        pair = getattr(pos, "pair", input.pair)
+        pip_def = _normalizer.PIP_DEFINITIONS.get(pair)
+
         atr_pips = 30.0  # fallback
         if primary is not None:
             atr = primary.values.get("atr14")
             if atr is not None and atr > 0:
-                atr_pips = atr * 100  # approximate for JPY pairs
+                if pip_def is not None:
+                    atr_pips = _normalizer.to_pips(atr, pair)
+                else:
+                    logger.warning("M4 PriceNormalizer: pair=%s not found, using fallback atr_pips=30", pair)
 
         current_price = getattr(pos, "current_price", None) or getattr(pos, "entry_price", 0.0)
         entry_price = getattr(pos, "entry_price", 0.0)
         side = getattr(pos, "side", "BUY")
 
-        # Calculate unrealized P&L in pips
-        if side == "BUY":
-            unrealized_pips = (current_price - entry_price) * 100
+        # Calculate unrealized P&L in pips via PriceNormalizer (設計書§5-4)
+        if pip_def is not None:
+            if side == "BUY":
+                unrealized_pips = _normalizer.to_pips(current_price - entry_price, pair)
+            else:
+                unrealized_pips = _normalizer.to_pips(entry_price - current_price, pair)
         else:
-            unrealized_pips = (entry_price - current_price) * 100
+            # Fallback for unknown pairs
+            if side == "BUY":
+                unrealized_pips = (current_price - entry_price) * 100
+            else:
+                unrealized_pips = (entry_price - current_price) * 100
 
         return PositionContext(
             pair=getattr(pos, "pair", input.pair),
